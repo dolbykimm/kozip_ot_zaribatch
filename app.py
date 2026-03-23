@@ -8,6 +8,8 @@ import streamlit as st
 from dotenv import load_dotenv
 from groq import Groq
 
+from streamlit_gsheets import GSheetsConnection
+
 load_dotenv()
 
 # ─────────────────────────────────────────────────────────────
@@ -213,35 +215,58 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
 # 2단계: 면접표 병합 헬퍼
 # ─────────────────────────────────────────────────────────────
 
+_SHEET_DETAIL_LIMIT = 10   # 이 개수 이상이면 상세 샘플 생략
+_SAMPLE_ROWS        = 3    # 시트당 샘플 행 수
+_MAX_COL_WIDTH      = 20   # 셀 값 최대 표시 길이
+_MAX_COLS_PER_SHEET = 8    # 시트당 최대 표시 열 수
+
+
 def build_sheets_summary(sheets: dict[str, pd.DataFrame]) -> str:
-    """LLM에게 넘길 시트 구조 요약 텍스트를 생성한다."""
+    """
+    토큰 절약형 시트 구조 요약.
+    - 비어 있는 열 제외, 핵심 열만 최대 _MAX_COLS_PER_SHEET 개
+    - 셀 값은 _MAX_COL_WIDTH 자로 절단
+    - 시트 수 >= _SHEET_DETAIL_LIMIT 이면 시트 이름 목록만 전송
+    """
+    sheet_names = list(sheets.keys())
+
+    # 시트가 너무 많으면 이름 목록만
+    if len(sheets) >= _SHEET_DETAIL_LIMIT:
+        return f"시트 목록({len(sheets)}개): {sheet_names}"
+
     parts = []
     for name, df in sheets.items():
-        sample = df.head(3).to_string(index=False, max_colwidth=40)
-        parts.append(
-            f"[시트: {name}]\n"
-            f"열 목록: {list(df.columns)}\n"
-            f"샘플 데이터:\n{sample}"
+        # 값이 하나라도 있는 열만 추림
+        nonempty_cols = [c for c in df.columns if df[c].notna().any()]
+        cols = nonempty_cols[:_MAX_COLS_PER_SHEET]
+
+        # 샘플 행: 지정 열만, 셀 값 절단
+        sample_df = df[cols].head(_SAMPLE_ROWS).astype(str)
+        sample_df = sample_df.applymap(lambda v: v[:_MAX_COL_WIDTH])
+
+        rows_txt = "; ".join(
+            " | ".join(f"{c}={sample_df.at[i,c]}" for c in cols)
+            for i in sample_df.index
         )
-    return "\n\n".join(parts)
+        parts.append(f"[{name}] 열:{cols} / 샘플:{rows_txt}")
+
+    return "\n".join(parts)
 
 
 def infer_sheet_structure(summary: str, model: str) -> str:
     """Groq LLM에게 시트 분류 기준과 코멘트 추출 방법을 추론하게 한다."""
-    prompt = f"""다음은 면접표 엑셀 파일의 시트 구조 요약입니다.
-
-{summary}
-
-이 엑셀 파일의 시트들이 어떤 기준(예: 면접관별, 날짜별, 조별 등)으로 나뉘어 있는지 추론하고,
-각 시트에서 지원자 코멘트/평가를 어떻게 추출하면 좋을지 파악해 주세요.
-한국어로 간결하게 답해 주세요."""
+    prompt = (
+        "면접표 엑셀 시트 구조:\n"
+        f"{summary}\n\n"
+        "질문: 시트 분류 기준(면접관별/날짜별/조별 등)과 코멘트 열 위치를 한국어로 간결히 답하라."
+    )
 
     client = get_groq_client()
     resp = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.2,
-        max_tokens=512,
+        max_tokens=256,
     )
     return resp.choices[0].message.content.strip()
 
@@ -440,6 +465,42 @@ def to_final_excel_bytes(df: pd.DataFrame) -> bytes:
 
 
 # ─────────────────────────────────────────────────────────────
+# Google Sheets 공유
+# ─────────────────────────────────────────────────────────────
+
+# session_state 키 → 워크시트 이름 매핑
+GS_TARGETS: list[tuple[str, str, str]] = [
+    ("자소서 분석 결과", "자소서분석", "df_personality"),
+    ("최종 병합 분석",   "최종분석",   "df_merged"),
+    ("자리배치 결과",    "자리배치",   "df_seated"),
+]
+
+
+@st.cache_resource(show_spinner=False)
+def get_gsheets_conn():
+    """GSheetsConnection 캐시 싱글턴. secrets.toml 미설정 시 None 반환."""
+    try:
+        return st.connection("gsheets", type=GSheetsConnection)
+    except Exception:
+        return None
+
+
+def save_to_gsheets(df: pd.DataFrame, worksheet: str) -> None:
+    conn = get_gsheets_conn()
+    if conn is None:
+        raise RuntimeError("Google Sheets 연결 미설정 — .streamlit/secrets.toml을 확인하세요.")
+    # 모든 열을 str 변환해 Sheets API 직렬화 오류 방지
+    conn.update(worksheet=worksheet, data=df.astype(str))
+
+
+def load_from_gsheets(worksheet: str) -> pd.DataFrame:
+    conn = get_gsheets_conn()
+    if conn is None:
+        raise RuntimeError("Google Sheets 연결 미설정 — .streamlit/secrets.toml을 확인하세요.")
+    return conn.read(worksheet=worksheet, ttl=0)  # ttl=0: 항상 최신 데이터
+
+
+# ─────────────────────────────────────────────────────────────
 # 유연한 열 이름 매핑
 # ─────────────────────────────────────────────────────────────
 # 각 의미 역할(role)에 대해 엑셀에서 쓰일 법한 동의어를 모두 나열한다.
@@ -454,7 +515,8 @@ ROLE_KEYWORDS: dict[str, list[str]] = {
 
 def _score(col: str, keyword: str) -> int:
     """열 이름과 키워드 사이의 유사도 점수."""
-    c = col.strip().lower().replace(" ", "")
+    col_str = str(col) if col is not None else ""
+    c = col_str.strip().lower().replace(" ", "")
     k = keyword.strip().lower().replace(" ", "")
     if c == k:
         return 3          # 완전 일치
@@ -490,8 +552,9 @@ def resolve_columns(columns: list[str]) -> dict[str, str | None]:
 st.set_page_config(page_title="오티 자리배치 앱", layout="wide")
 st.title("오티 자리배치 앱")
 
-# ── 사이드바: 모델 선택 ───────────────────────────────────────
+# ── 사이드바 ─────────────────────────────────────────────────
 with st.sidebar:
+    # ── 모델 설정 ────────────────────────────────────────────
     st.header("모델 설정")
     with st.spinner("Groq 모델 목록 로딩 중..."):
         llama_models = fetch_llama_models()
@@ -502,6 +565,46 @@ with st.sidebar:
         help="Groq에서 현재 활성화된 llama 계열 모델 목록입니다. (5분마다 자동 갱신)",
     )
     st.caption(f"선택된 모델: `{selected_model}`")
+
+    # ── Google Sheets 공유 ───────────────────────────────────
+    st.divider()
+    st.header("Google Sheets 공유")
+
+    gsheets_ok = get_gsheets_conn() is not None
+    if not gsheets_ok:
+        st.warning("`secrets.toml` 미설정 — Google Sheets 기능 비활성화")
+
+    for label, ws, ss_key in GS_TARGETS:
+        st.markdown(f"**{label}**")
+        c_save, c_load = st.columns(2)
+
+        with c_save:
+            if st.button(
+                "저장",
+                key=f"gs_save_{ws}",
+                disabled=not (gsheets_ok and ss_key in st.session_state),
+                use_container_width=True,
+            ):
+                try:
+                    save_to_gsheets(st.session_state[ss_key], ws)
+                    st.success("저장 완료")
+                except Exception as e:
+                    st.error(str(e))
+
+        with c_load:
+            if st.button(
+                "불러오기",
+                key=f"gs_load_{ws}",
+                disabled=not gsheets_ok,
+                use_container_width=True,
+            ):
+                try:
+                    df_loaded = load_from_gsheets(ws)
+                    st.session_state[ss_key] = df_loaded
+                    st.success(f"{len(df_loaded)}행 로드")
+                    st.rerun()
+                except Exception as e:
+                    st.error(str(e))
 
 tab1, tab2, tab3 = st.tabs(["1단계: 자소서 분석", "2단계: 면접표 병합", "3단계: 자리배치"])
 
