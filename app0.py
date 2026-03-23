@@ -65,42 +65,34 @@ def analyze_personality(학과: str, 학번: str, 이름: str, 자소서: str, m
 
 
 # ─────────────────────────────────────────────────────────────
-# 성별 추정 (LLM 배치 방식)
+# 성별 추정 (한국 이름 휴리스틱)
 # ─────────────────────────────────────────────────────────────
+# 이름 마지막 글자 기준 — 겹치는 글자는 별도 처리
+_FEMALE = set("지수연은아영희혜선나라미채원빈서하봄별솔유림")
+_MALE   = set("준호석훈재기철동혁태강산도일규범찬우")
+_AMBIG  = _FEMALE & _MALE  # 겹치는 경우 전체 이름으로 재판단
 
-@st.cache_data(show_spinner=False)
-def estimate_genders_batch(names_tuple: tuple[str, ...], model: str) -> dict[str, str]:
-    """
-    이름 목록을 한 번의 LLM 호출로 성별 추정.
-    캐시 키로 tuple 사용 (hashable).
-    """
-    names = list(names_tuple)
-    if not names:
-        return {}
-    names_str = "\n".join(f"- {n}" for n in names)
-    prompt = (
-        "아래 한국 이름들의 성별을 추정해 반드시 '이름: 남' 또는 '이름: 여' 형식으로만 한 줄씩 답하라.\n"
-        f"{names_str}"
-    )
-    try:
-        client = get_groq_client()
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-            max_tokens=len(names) * 12 + 30,
-        )
-        result: dict[str, str] = {}
-        for line in resp.choices[0].message.content.strip().split("\n"):
-            for name in names:
-                if name in line:
-                    result[name] = "여" if "여" in line else "남"
-                    break
-        for name in names:
-            result.setdefault(name, "미상")   # 누락된 이름 기본값
-        return result
-    except Exception:
-        return {n: "미상" for n in names}
+
+def estimate_gender(name: str) -> str:
+    """한국 이름 마지막 글자·전체 빈도 기반 성별 추정."""
+    if not name or len(name) < 2:
+        return "미상"
+    given = name[1:]          # 성(family name) 제거
+    last  = given[-1]
+
+    if last in _FEMALE and last not in _AMBIG:
+        return "여"
+    if last in _MALE and last not in _AMBIG:
+        return "남"
+
+    # 전체 글자 빈도로 재판단
+    f = sum(1 for c in given if c in _FEMALE)
+    m = sum(1 for c in given if c in _MALE)
+    if f > m:
+        return "여"
+    if m > f:
+        return "남"
+    return "미상"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -111,7 +103,6 @@ def assign_seats(
     num_people: int,
     personality_mode: str,
     student_id_policy: str,
-    model: str = "llama-3.3-70b-versatile",
 ) -> pd.DataFrame:
     """
     규칙
@@ -132,13 +123,8 @@ def assign_seats(
     (테이블_번호 오름차순 정렬)
     """
     work = df.copy().reset_index(drop=True)
-    work["EI"] = work["성격 판정"].apply(lambda x: "E" if "외향" in str(x) else "I")
-
-    # LLM 배치로 성별 추정 (한 번의 API 호출)
-    unique_names   = tuple(work["이름"].astype(str).unique())
-    gender_map     = estimate_genders_batch(unique_names, model)
-    work["성별"]   = work["이름"].astype(str).map(gender_map).fillna("미상")
-
+    work["EI"]       = work["성격 판정"].apply(lambda x: "E" if "외향" in str(x) else "I")
+    work["성별"]     = work["이름"].apply(estimate_gender)
     work["학번_연도"] = work["학번"].astype(str).str[:2]
 
     n          = len(work)
@@ -329,29 +315,34 @@ def _trim_tail(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# ─── 지원자 이름 감지 상수 ──────────────────────────────────────
-_NAME_EXACT_RE  = re.compile(r"^[가-힣]{2,4}$")   # 열 스캔용 (exact match)
-_NAME_PREFIX_RE = re.compile(r"^[가-힣]{2,4}")    # 셀 파싱용 (prefix)
-# 이름 열 헤더 레이블: 이 값만 있는 행은 data_start 후보에서 제외
-_HEADER_NAMES   = frozenset({"이름", "성명", "성함", "지원자", "대상자"})
+# ─── 지원자 행 감지 상수 ────────────────────────────────────────
+# 이름 시작 부분(2~4 한글) + 뒤에 학번·학과가 붙어있어도 매칭
+_APPLICANT_NAME_RE = re.compile(r"^[가-힣]{2,4}")
+_NUMERIC_RE        = re.compile(r"^\d[\d.\-/]*$")   # 학번·점수·날짜 등 숫자 계열
+_EVALUATOR_LABELS  = frozenset({"면접관", "평가자", "채점자", "평가위원"})
+# 이름 셀 파싱: 이름 뒤에 붙은 학과·학번 분리
+_NAME_CELL_RE      = re.compile(r"^([가-힣]{2,4})")
 
 
-def _find_name_col_idx(df_raw: pd.DataFrame) -> int | None:
+def _looks_like_applicant_row(row: pd.Series) -> bool:
     """
-    모든 열을 스캔해 한국어 이름(2~4자 한글, exact) 패턴이
-    가장 많이 나타나는 열 인덱스를 반환한다.
-    최소 2개 이상인 열에서만 선택 (1개는 헤더 레이블일 가능성).
+    행이 '지원자 데이터 행'처럼 보이면 True.
+    조건 ① 한국어 이름(2~4자, 뒤에 학과/학번이 붙어있어도 OK)이 있고
+         ② 숫자 값(학번·점수 등)이 하나 이상 있고   ← 헤더 행 오인 방지
+         ③ '면접관' 등 평가자 레이블 문자열이 없을 것
     """
-    best_col, best_count = None, 0
-    for ci in range(len(df_raw.columns)):
-        cnt = sum(
-            1 for v in df_raw.iloc[:, ci].astype(str)
-            if bool(_NAME_EXACT_RE.match(v.strip()))
-            and v.strip() not in ("nan", "NaN", "None", "")
-        )
-        if cnt > best_count:
-            best_count, best_col = cnt, ci
-    return best_col if best_count >= 2 else None
+    vals = [
+        str(v).strip()
+        for v in row
+        if str(v).strip() not in ("", "nan", "NaN", "None")
+    ]
+    if len(vals) < 2:
+        return False
+    if any(lbl in v for v in vals for lbl in _EVALUATOR_LABELS):
+        return False
+    has_name    = any(bool(_APPLICANT_NAME_RE.match(v)) for v in vals)
+    has_numeric = any(bool(_NUMERIC_RE.match(v))        for v in vals)
+    return has_name and has_numeric
 
 
 def _parse_name_cell(raw: str) -> tuple[str, str, str]:
@@ -381,50 +372,41 @@ def extract_all_comments(sheets: dict[str, pd.DataFrame]) -> pd.DataFrame:
     """
     모든 시트를 순회하며 (학번, 이름, 학과, 전화번호, 면접_통합데이터) 테이블을 반환한다.
 
-    ─ 새 접근법: 열(column) 우선 탐색 ────────────────────────────────────────
-    행 단위로 "지원자 행인지" 판단하는 대신, 먼저 시트 전체 열을 스캔해
-    한국어 이름이 가장 많이 등장하는 열 = 이름 열을 확정한다.
-    그 열에서 실제 이름이 처음 나오는 행 = 데이터 시작.
+    ─ 핵심 구조 ─────────────────────────────────────────────────────────────
+    지원자 1명의 이름·학번이 병합 셀로 여러 행에 걸쳐 있고,
+    각 행마다 면접관 코멘트·점수가 따로 기록되는 비정형 채점표를 처리한다.
 
     처리 순서 (시트별)
-    ① 열 스캔         : 이름이 가장 많이 나오는 열(name_col) 확정
-    ② data_start      : name_col에서 실제 이름이 첫 등장하는 행
+    ① 지원자 행 탐색  : 위에서부터 스캔 → 이름+숫자가 같이 있는 첫 행 = 데이터 시작
                         직전 행 = 컬럼 헤더
-    ③ _trim_tail      : 데이터 시작 ~ 첫 완전-빈 행까지만 유지 (푸터 제거)
-    ④ 병합 셀 ffill   : 이름·학번 열의 NaN → 위 행 값으로 채움
-    ⑤ 행별 수집       : 메타 열 제외 나머지를 "[컬럼명] 값" 형식으로 이어붙임
-    ⑥ groupby         : 학번+이름 기준으로 여러 행 데이터를 한 사람으로 합산
+    ② _trim_tail      : 데이터 시작 ~ 첫 완전-빈 행까지만 유지 (푸터 제거)
+    ③ 병합 셀 ffill   : 이름·학번 열의 NaN → 위 행 값으로 채움
+    ④ 행별 수집       : 메타 열 제외 나머지를 "[컬럼명] 값" 형식으로 이어붙임
+    ⑤ groupby         : 학번+이름 기준으로 여러 행 데이터를 한 사람으로 합산
     ─────────────────────────────────────────────────────────────────────────
     """
     all_rows: list[dict] = []
 
     for sheet_name, df_raw in sheets.items():
-        if df_raw.empty:
-            continue
 
-        # ① 열 스캔: 한국 이름(2~4자 exact)이 가장 많이 나오는 열
-        name_col_raw = _find_name_col_idx(df_raw)
-        if name_col_raw is None:
-            continue
-
-        # ② name_col_raw 기준으로 data_start 탐색
-        #    (헤더 레이블 "이름"/"성명" 등은 건너뜀)
+        # ① 위에서부터 스캔: 지원자 행(이름+숫자)이 처음 나타나는 위치
         data_start: int | None = None
         for i in range(len(df_raw)):
-            v = str(df_raw.iloc[i, name_col_raw]).strip()
-            if bool(_NAME_EXACT_RE.match(v)) and v not in _HEADER_NAMES:
+            if _looks_like_applicant_row(df_raw.iloc[i]):
                 data_start = i
                 break
         if data_start is None:
             continue
 
-        # 헤더 행 = data_start 직전 행 (없으면 ROLE_KEYWORDS 폴백)
+        # 헤더 행 = data_start 직전 행 (행이 없으면 ROLE_KEYWORDS 폴백)
         header_row = (data_start - 1) if data_start > 0 else _find_header_row(df_raw)
         col_names  = df_raw.iloc[header_row].astype(str).str.strip().tolist()
 
-        # 데이터 슬라이스 + ③ _trim_tail (첫 완전-빈 행에서 잘라 푸터 제거)
+        # 데이터 슬라이스: data_start 부터 끝까지, 헤더 컬럼명 적용
         df = df_raw.iloc[data_start:].copy().reset_index(drop=True)
         df.columns = col_names
+
+        # ② _trim_tail: 첫 완전-빈 행(= 푸터 경계선) 이하 제거
         df = _trim_tail(df)
         if df.empty:
             continue
@@ -449,13 +431,7 @@ def extract_all_comments(sheets: dict[str, pd.DataFrame]) -> pd.DataFrame:
         dept_idx  = _col_idx("학과")
         phone_idx = _col_idx("전화번호")
 
-        # name_col 매핑이 실패한 경우 열 스캔 결과로 보완
-        # (data_start 행이 헤더 바로 다음이므로 name_col_raw 위치 그대로 사용 가능)
-        if name_idx is None:
-            # 헤더 슬라이스 후의 새 컬럼 위치: name_col_raw 번째
-            name_idx = name_col_raw if name_col_raw < len(cols) else None
-
-        # ④ 병합 셀 ffill: 이름·학번 열의 NaN을 위 행 값으로 채움
+        # ③ 병합 셀 ffill: 이름·학번 열의 NaN을 위 행 값으로 채움
         for ki in [id_idx, name_idx]:
             if ki is not None:
                 df.iloc[:, ki] = (
@@ -467,7 +443,7 @@ def extract_all_comments(sheets: dict[str, pd.DataFrame]) -> pd.DataFrame:
         meta_idxs = {i for i in [id_idx, name_idx, dept_idx, phone_idx] if i is not None}
         data_idxs = [i for i in range(len(cols)) if i not in meta_idxs]
 
-        # ⑤ 행별 데이터 수집 — 모든 셀 접근은 df.iloc[row_i, col_i]
+        # ④ 행별 데이터 수집 — 모든 셀 접근은 df.iloc[row_i, col_i]
         for row_i in range(len(df)):
 
             def _get(idx: int | None) -> str:
@@ -478,14 +454,16 @@ def extract_all_comments(sheets: dict[str, pd.DataFrame]) -> pd.DataFrame:
 
             학번_raw = _get(id_idx)
             이름_raw = _get(name_idx)
+            # 이름 셀에 학과·학번이 붙어있을 수 있으므로 분리
             이름, _xdept, _xid = _parse_name_cell(이름_raw)
-            학과 = _get(dept_idx) or _xdept
+            학과 = _get(dept_idx) or _xdept      # 전용 열 없으면 이름 셀에서 보완
             전화 = _get(phone_idx)
-            학번 = 학번_raw or _xid
+            학번 = 학번_raw or _xid              # 전용 열 없으면 이름 셀에서 보완
 
             if not 이름 and not 학번:
                 continue
 
+            # 메타 열 제외 나머지 전부 수집 (점수·코멘트·비고 등)
             parts = [
                 f"[{str(cols[ci]).strip()}] {str(df.iloc[row_i, ci]).strip()}"
                 for ci in data_idxs
@@ -1127,7 +1105,7 @@ with tab3:
             df_src = st.session_state["df_personality"].copy()
 
             with st.spinner("배치 중..."):
-                df_seated = assign_seats(df_src, num_people, personality, student_id_policy, model=selected_model)
+                df_seated = assign_seats(df_src, num_people, personality, student_id_policy)
 
             st.session_state["df_seated"] = df_seated
             st.success(
@@ -1156,14 +1134,9 @@ with tab3:
                         st.markdown(f"**테이블 {t_num}** &nbsp; `E:{e_cnt} I:{i_cnt}`")
                         for _, r in grp.iterrows():
                             gender_icon = {"남": "♂", "여": "♀"}.get(r["성별"], "?")
-                            ei_color = "#d4a017" if r["EI"] == "E" else "#27ae60"
-                            ei_tag = (
-                                f'<span style="color:{ei_color};font-weight:bold">'
-                                f'{r["EI"]}</span>'
-                            )
+                            ei_tag = "🔴E" if r["EI"] == "E" else "🔵I"
                             st.markdown(
-                                f"- {gender_icon} {r['이름']} ({r['학과']} / {r['학번_연도']}학번) {ei_tag}",
-                                unsafe_allow_html=True,
+                                f"- {gender_icon} {r['이름']} ({r['학과']} / {r['학번_연도']}학번) {ei_tag}"
                             )
 
             # ── 전체 데이터프레임 ─────────────────────────────
