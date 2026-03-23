@@ -394,129 +394,164 @@ def _parse_name_cell(raw: str) -> tuple[str, str, str]:
 
 
 def extract_all_comments(sheets: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """
+    상태 머신 방식으로 면접 통합데이터를 추출한다.
+
+    1. 헤더 동적 탐색: '지원자'/'이름' AND '의견'/'비고' 키워드가 같은 행에 존재하는 행을 헤더로 특정
+    2. current_name 상태 유지: 이름 열에 한국어 이름이 나오면 갱신
+    3. 의견/비고 열 텍스트를 누적 (빈칸 아닌 모든 셀)
+    4. 전체 병합 메모 행 처리: 열 헤더 무관하게 빈칸이 아닌 텍스트 → 현재 추적 지원자에 귀속
+    5. '평가기준'/'평가 기준'/'주의사항' 발견 시 즉시 파싱 중단
+    """
+    _EMPTY = {"", "nan", "NaN", "None", "none"}
+    _FOOTER_WORDS = ("평가기준", "평가 기준", "주의사항")
+    _NAME_KW  = ("지원자", "이름", "성명", "성함", "대상자")
+    _OPINE_KW = ("의견", "비고", "코멘트", "comment", "특이사항", "추가의견")
+
+    def _cell(v) -> str:
+        s = str(v).strip()
+        return "" if s.lower() in _EMPTY else s
+
+    def _row_has_footer(row_cells: list[str]) -> bool:
+        joined = " ".join(row_cells)
+        return any(w in joined for w in _FOOTER_WORDS)
+
+    def _find_header_row(df_raw: pd.DataFrame) -> int | None:
+        """'이름계열' 키워드 AND '의견계열' 키워드가 동시에 있는 첫 행 인덱스를 반환."""
+        for ri in range(min(30, len(df_raw))):
+            cells = [_cell(df_raw.iloc[ri, ci]) for ci in range(len(df_raw.columns))]
+            cells_lower = [c.lower() for c in cells]
+            has_name  = any(any(kw in c for kw in _NAME_KW)  for c in cells_lower)
+            has_opine = any(any(kw in c for kw in _OPINE_KW) for c in cells_lower)
+            if has_name and has_opine:
+                return ri
+        return None
+
+    def _find_name_col_from_header(header_cells: list[str]) -> int | None:
+        """헤더 행에서 이름 열 인덱스 반환."""
+        for ci, c in enumerate(header_cells):
+            if any(kw in c.lower() for kw in _NAME_KW):
+                return ci
+        return None
+
+    def _find_opine_cols(header_cells: list[str]) -> list[int]:
+        """헤더 행에서 의견/비고 열 인덱스 목록 반환."""
+        return [ci for ci, c in enumerate(header_cells)
+                if any(kw in c.lower() for kw in _OPINE_KW)]
+
     all_rows: list[dict] = []
 
     for sheet_name, df_raw in sheets.items():
         if df_raw.empty:
             continue
 
-        name_col_raw = _find_name_col_idx(df_raw)
-        if name_col_raw is None:
-            continue
-
-        data_start = None
-        for i in range(len(df_raw)):
-            val = str(df_raw.iloc[i, name_col_raw]).strip()
-            if _is_korean_name(val):
-                data_start = i
-                break
-        
-        if data_start is None:
-            continue
-
-        # --- 1. 다중 헤더(지붕) 병합 완벽 처리 ---
-        header_row = (data_start - 1) if data_start > 0 else 0
-        raw_headers = df_raw.iloc[header_row].astype(str).str.strip()
-        
-        if header_row > 0:
-            above_headers = df_raw.iloc[header_row - 1].astype(str).str.strip()
-            # 윗줄과 아랫줄 헤더 결합 (빈칸이면 윗줄 끌어오기)
-            for c_i in range(len(raw_headers)):
-                v = raw_headers.iloc[c_i]
-                av = above_headers.iloc[c_i]
-                if v in ("", "nan", "NaN", "None"):
-                    raw_headers.iloc[c_i] = av if av not in ("", "nan", "NaN", "None") else f"항목_{c_i}"
-        
-        col_names = raw_headers.tolist()
-        df = df_raw.iloc[data_start:].copy().reset_index(drop=True)
-        df.columns = col_names
-
-        # --- 2. 스마트 꼬리 자르기 (중간 빈 줄 삭제 방지, 하단 평가기준만 컷) ---
-        trim_idx = len(df)
-        for i in range(len(df)):
-            row_vals = df.iloc[i].astype(str).str.strip()
-            is_empty = all(v in ("", "nan", "NaN", "None") for v in row_vals)
-            row_str = " ".join(row_vals.str.lower())
-            is_footer = "평가기준" in row_str or "평가 기준" in row_str or "주의사항" in row_str
-            
-            if is_empty or is_footer:
-                # 밑에 유효한 이름이 더 있는지 확인 (있으면 중간 빈 줄이므로 무시)
-                has_name_below = False
-                for j in range(i + 1, len(df)):
-                    if _is_korean_name(str(df.iloc[j, name_col_raw])):
-                        has_name_below = True
-                        break
-                if not has_name_below:
-                    trim_idx = i
+        # ── 1. 헤더 행 탐색 ──────────────────────────────────────────
+        header_ri = _find_header_row(df_raw)
+        if header_ri is None:
+            # 의견 키워드 없어도 이름 열은 있을 수 있으므로 fallback: 이름 열만으로 탐색
+            name_ci_fallback = _find_name_col_idx(df_raw)
+            if name_ci_fallback is None:
+                continue
+            # 헤더는 이름이 처음 나오는 행 바로 위
+            for ri in range(len(df_raw)):
+                if _is_korean_name(_cell(df_raw.iloc[ri, name_ci_fallback])):
+                    header_ri = max(0, ri - 1)
                     break
-        
-        df = df.iloc[:trim_idx].copy()
-        if df.empty:
+            if header_ri is None:
+                continue
+
+        header_cells = [_cell(df_raw.iloc[header_ri, ci]) for ci in range(len(df_raw.columns))]
+        name_ci  = _find_name_col_from_header(header_cells)
+        opine_cis = _find_opine_cols(header_cells)
+
+        # 이름 열을 헤더에서 못 찾으면 전체 시트에서 재탐색
+        if name_ci is None:
+            name_ci = _find_name_col_idx(df_raw)
+        if name_ci is None:
             continue
 
-        cols = df.columns.tolist()
-        col_map = resolve_columns(cols)
+        # ── 2. 상태 머신: 헤더 다음 행부터 순회 ─────────────────────
+        current_name  = ""
+        current_id    = ""
+        current_dept  = ""
+        current_phone = ""
+        current_parts: list[str] = []
 
-        def _col_idx(role: str) -> int | None:
-            mapped = col_map.get(role)
-            if mapped is None: return None
-            try: return cols.index(mapped)
-            except ValueError: return None
+        # id/학과/전화 열 인덱스 (헤더에서)
+        id_ci_list    = [ci for ci, c in enumerate(header_cells) if "학번" in c or "번호" in c and "전화" not in c]
+        dept_ci_list  = [ci for ci, c in enumerate(header_cells) if "학과" in c or "부서" in c or "전공" in c]
+        phone_ci_list = [ci for ci, c in enumerate(header_cells) if "전화" in c or "연락" in c]
+        id_ci    = id_ci_list[0]    if id_ci_list    else None
+        dept_ci  = dept_ci_list[0]  if dept_ci_list  else None
+        phone_ci = phone_ci_list[0] if phone_ci_list else None
 
-        id_idx    = _col_idx("학번")
-        name_idx  = _col_idx("이름")
-        dept_idx  = _col_idx("학과")
-        phone_idx = _col_idx("전화번호")
+        def _flush():
+            """현재 지원자 데이터를 all_rows 에 저장."""
+            if current_name and current_parts:
+                all_rows.append({
+                    "학번":        current_id,
+                    "이름":        current_name,
+                    "학과":        current_dept,
+                    "전화번호":    current_phone,
+                    "면접_통합데이터": "\n".join(current_parts),
+                })
 
-        if name_idx is None:
-            name_idx = name_col_raw if name_col_raw < len(cols) else 0
+        stop = False
+        for ri in range(header_ri + 1, len(df_raw)):
+            row_cells = [_cell(df_raw.iloc[ri, ci]) for ci in range(len(df_raw.columns))]
 
-        # --- 3. 완벽한 ffill (순수 nan 문자열까지 캐치해서 빈칸 이름 채우기) ---
-        for ki in [id_idx, name_idx]:
-            if ki is not None and ki < len(df.columns):
-                df.iloc[:, ki] = (
-                    df.iloc[:, ki]
-                    .astype(str)
-                    .replace(["nan", "NaN", "None", ""], pd.NA)
-                    .replace(r"^\s*$", pd.NA, regex=True)
-                    .ffill()
-                )
+            # 꼬리 감지 → 즉시 중단
+            if _row_has_footer(row_cells):
+                stop = True
+                break
 
-        meta_idxs = {i for i in [id_idx, name_idx, dept_idx, phone_idx] if i is not None}
-        data_idxs = [i for i in range(len(cols)) if i not in meta_idxs]
-
-        # --- 4. 데이터 추출 및 파편화된 행 하나로 뭉치기 ---
-        for row_i in range(len(df)):
-            def _get(idx: int | None) -> str:
-                if idx is None or idx >= len(df.columns): return ""
-                v = df.iloc[row_i, idx]
-                s = str(v).strip()
-                return "" if s in ("nan", "NaN", "None") else s
-
-            학번_raw = _get(id_idx)
-            이름_raw = _get(name_idx)
-            이름, _xdept, _xid = _parse_name_cell(이름_raw)
-            학과 = _get(dept_idx) or _xdept
-            전화 = _get(phone_idx)
-            학번 = 학번_raw or _xid
-
-            if not 이름 and not 학번:
+            # 완전 빈 행 → 건너뜀
+            if not any(row_cells):
                 continue
 
-            parts = []
-            for ci in data_idxs:
-                col_name = str(cols[ci]).strip()
-                val = str(df.iloc[row_i, ci]).strip()
-                if val not in ("", "nan", "NaN", "None") and col_name not in ("", "nan", "NaN", "None") and not col_name.startswith("항목_"):
-                    parts.append(f"[{col_name}] {val}")
-            
-            if not parts:
+            # 이름 열 확인
+            name_val = row_cells[name_ci] if name_ci < len(row_cells) else ""
+            if _is_korean_name(name_val):
+                # 새 지원자 시작 → 이전 지원자 저장
+                _flush()
+                parsed_name, xdept, xid = _parse_name_cell(name_val)
+                current_name  = parsed_name
+                current_id    = (row_cells[id_ci] if id_ci is not None and id_ci < len(row_cells) else "") or xid
+                current_dept  = (row_cells[dept_ci] if dept_ci is not None and dept_ci < len(row_cells) else "") or xdept
+                current_phone = row_cells[phone_ci] if phone_ci is not None and phone_ci < len(row_cells) else ""
+                current_parts = []
+
+            if not current_name:
+                # 아직 지원자 탐색 전 → 건너뜀
                 continue
 
-            all_rows.append({
-                "학번": 학번, "이름": 이름, "학과": 학과, "전화번호": 전화,
-                "면접_통합데이터": "\n".join(parts),
-            })
+            # ── 의견/비고 열 텍스트 수집 ──────────────────────────────
+            if opine_cis:
+                for oci in opine_cis:
+                    if oci < len(row_cells) and row_cells[oci]:
+                        col_label = header_cells[oci] if oci < len(header_cells) else f"col{oci}"
+                        current_parts.append(f"[{col_label}] {row_cells[oci]}")
+            else:
+                # 의견 열이 없으면: 이름/id/학과/전화 외 모든 비어있지 않은 셀 수집
+                skip_cis = {c for c in [name_ci, id_ci, dept_ci, phone_ci] if c is not None}
+                for ci, val in enumerate(row_cells):
+                    if ci not in skip_cis and val:
+                        col_label = header_cells[ci] if ci < len(header_cells) else f"col{ci}"
+                        current_parts.append(f"[{col_label}] {val}")
+
+            # ── 전체 병합 메모 행 처리 ────────────────────────────────
+            # 이름 열이 비어있고 의견 열도 모두 비어있지만 다른 셀에 텍스트 있으면 → 병합 메모
+            name_empty = not name_val
+            opine_empty = not any(row_cells[oci] for oci in opine_cis if oci < len(row_cells)) if opine_cis else True
+            if name_empty and opine_empty:
+                skip_cis = {c for c in [name_ci, id_ci, dept_ci, phone_ci] if c is not None}
+                memo_vals = [val for ci, val in enumerate(row_cells) if ci not in skip_cis and val]
+                if memo_vals:
+                    current_parts.append("[메모] " + " / ".join(memo_vals))
+
+        # 마지막 지원자 저장
+        if not stop or current_name:
+            _flush()
 
     if not all_rows:
         return pd.DataFrame(columns=["학번", "이름", "학과", "전화번호", "면접_통합데이터"])
@@ -524,7 +559,8 @@ def extract_all_comments(sheets: dict[str, pd.DataFrame]) -> pd.DataFrame:
     df_res = pd.DataFrame(all_rows)
     df_res["이름"] = df_res["이름"].astype(str).str.strip()
     df_res["학번"] = df_res["학번"].astype(str).str.strip()
-    
+
+    # 같은 사람의 여러 행(병합 셀 분리) 하나로 합치기
     return (
         df_res
         .groupby(["학번", "이름"], as_index=False)
