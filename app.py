@@ -288,12 +288,25 @@ def dept_abbrev_match(short: str, long: str) -> bool:
     return all(ch in it for ch in s)
 
 
+def _is_score_col(series: pd.Series) -> bool:
+    """해당 열이 0~100 범위의 숫자 점수 열인지 판별한다."""
+    numeric = pd.to_numeric(series, errors="coerce")
+    valid   = numeric.dropna()
+    if len(valid) == 0:
+        return False
+    # 80% 이상의 값이 0~100 범위여야 점수 열로 간주
+    return bool(valid.between(0, 100).mean() >= 0.8)
+
+
 def extract_all_comments(sheets: dict[str, pd.DataFrame]) -> pd.DataFrame:
     """
-    모든 시트를 순회하며 (학번, 이름, 학과, 전화번호, 면접_코멘트) 테이블을 반환한다.
-    - 각 시트에서 학번/이름/학과/전화번호 열을 자동 감지
-    - 나머지 텍스트 열을 코멘트로 간주, "[시트·열] 내용" 형식으로 이어붙임
-    - 같은 사람의 코멘트가 여러 시트에 있으면 합산
+    모든 시트를 순회하며
+    (학번, 이름, 학과, 전화번호, 면접_코멘트, 면접_평균점수) 테이블을 반환한다.
+
+    - 메타 열(학번/이름/학과/전화번호)을 제외한 나머지 열을 두 종류로 분류
+        · 점수 열: 값이 0~100 숫자 → 행별 평균 → 면접_평균점수
+        · 코멘트 열: 그 외 모든 열 → 비어있지 않은 셀을 전부 이어붙임
+    - str(val).strip() 으로 모든 셀을 안전하게 처리
     """
     all_rows: list[dict] = []
 
@@ -305,12 +318,11 @@ def extract_all_comments(sheets: dict[str, pd.DataFrame]) -> pd.DataFrame:
         phone_col = col_map.get("전화번호")
 
         meta_cols = {c for c in [id_col, name_col, dept_col, phone_col] if c}
-        comment_cols = [
-            c for c in df.columns
-            if c not in meta_cols
-            and df[c].dtype == object
-            and df[c].dropna().astype(str).str.len().mean() > 3
-        ]
+        remaining = [c for c in df.columns if c not in meta_cols]
+
+        # 점수 열 / 코멘트 열 분리
+        score_cols   = [c for c in remaining if _is_score_col(df[c])]
+        comment_cols = [c for c in remaining if c not in score_cols]
 
         for _, row in df.iterrows():
             학번 = str(row[id_col]).strip()    if id_col    else ""
@@ -320,21 +332,41 @@ def extract_all_comments(sheets: dict[str, pd.DataFrame]) -> pd.DataFrame:
             if not 학번 and not 이름:
                 continue
 
+            # 코멘트: dtype 무관하게 비어있지 않은 셀 전부 수집
             text = "\n".join(
-                f"[{sheet_name}·{col}] {row[col]}"
+                f"[{sheet_name}·{col}] {str(row[col]).strip()}"
                 for col in comment_cols
                 if pd.notna(row[col]) and str(row[col]).strip()
             )
-            all_rows.append({"학번": 학번, "이름": 이름, "학과": 학과, "전화번호": 전화, "면접_코멘트": text})
+
+            # 점수: 해당 행의 숫자 열 평균
+            score_vals = [
+                pd.to_numeric(str(row[c]).strip(), errors="coerce")
+                for c in score_cols
+                if pd.notna(row[c]) and str(row[c]).strip()
+            ]
+            score_vals = [v for v in score_vals if pd.notna(v)]
+            avg_score  = round(sum(score_vals) / len(score_vals), 2) if score_vals else None
+
+            all_rows.append({
+                "학번": 학번, "이름": 이름, "학과": 학과, "전화번호": 전화,
+                "면접_코멘트": text, "면접_평균점수": avg_score,
+            })
 
     if not all_rows:
-        return pd.DataFrame(columns=["학번", "이름", "학과", "전화번호", "면접_코멘트"])
+        return pd.DataFrame(
+            columns=["학번", "이름", "학과", "전화번호", "면접_코멘트", "면접_평균점수"]
+        )
 
     return (
         pd.DataFrame(all_rows)
         .groupby(["학번", "이름"], as_index=False)
-        .agg({"학과": "first", "전화번호": "first",
-              "면접_코멘트": lambda x: "\n".join(filter(None, x))})
+        .agg({
+            "학과":        "first",
+            "전화번호":    "first",
+            "면접_코멘트": lambda x: "\n".join(filter(None, x)),
+            "면접_평균점수": "mean",
+        })
     )
 
 
@@ -433,19 +465,35 @@ def smart_merge(
     return df_merged, ambiguous
 
 
-def reanalyze_final(이름: str, 성격_판정: str, 근거: str, 면접_코멘트: str, model: str) -> str:
-    """자소서 기반 판정 + 면접 코멘트를 종합해 최종 한 줄로 요약한다."""
-    prompt = f"""지원자 이름: {이름}
+def reanalyze_final(
+    이름: str,
+    성격_판정: str,
+    근거: str,
+    면접_코멘트: str,
+    model: str,
+    면접_평균점수: float | None = None,
+    score_label: str = "",          # "상위권" / "중간권" / "하위권"
+) -> str:
+    """자소서 기반 판정 + 면접 코멘트 (+ 선택적 면접 점수)를 종합해 최종 한 줄로 요약한다."""
 
-[자소서 기반 성격 판정]
-{성격_판정} — {근거}
+    # 점수 컨텍스트: 있을 때만 프롬프트에 삽입 (비중 ~10%)
+    score_ctx = ""
+    if 면접_평균점수 is not None and score_label:
+        score_ctx = (
+            f"\n[면접 점수]\n"
+            f"평균 {면접_평균점수:.1f}점 ({score_label})\n"
+            f"※ 이 점수는 최종 판단에 약 10% 정도만 반영하세요. "
+            f"자소서·면접 코멘트가 주된 근거입니다."
+        )
 
-[면접 코멘트]
-{면접_코멘트}
-
-위 두 정보를 종합하여, 이 지원자의 성격을 **외향형** 또는 **내향형** 중 하나로 최종 판단하고,
-한 문장으로 간결하게 요약해 주세요.
-반드시 첫 줄에 "외향형" 또는 "내향형" 한 단어만 적고, 줄바꿈 후 한 문장 근거를 작성하세요."""
+    prompt = (
+        f"지원자: {이름}\n\n"
+        f"[자소서 기반 성격 판정]\n{성격_판정} — {근거}\n\n"
+        f"[면접 코멘트]\n{str(면접_코멘트).strip()}"
+        f"{score_ctx}\n\n"
+        "위 정보를 종합하여 외향형/내향형 중 하나로 최종 판단하세요. "
+        "첫 줄에 '외향형' 또는 '내향형'만 쓰고, 줄바꿈 후 한 문장으로 근거를 작성하세요."
+    )
 
     client = get_groq_client()
     resp = client.chat.completions.create(
@@ -845,14 +893,38 @@ with tab2:
                 targets  = df_final[df_final["면접_코멘트"].notna()]
                 progress = st.progress(0, text="재분석 중...")
 
+                # 점수 퍼센타일 기준 계산 (점수 열이 있을 때만)
+                score_col_exists = "면접_평균점수" in df_final.columns
+                if score_col_exists:
+                    all_scores = pd.to_numeric(df_final["면접_평균점수"], errors="coerce").dropna()
+                    q25 = all_scores.quantile(0.25) if len(all_scores) else None
+                    q75 = all_scores.quantile(0.75) if len(all_scores) else None
+
+                def get_score_label(score: float | None) -> str:
+                    if score is None or not score_col_exists or q25 is None:
+                        return ""
+                    if score >= q75:
+                        return "상위권"
+                    if score <= q25:
+                        return "하위권"
+                    return "중간권"
+
                 for i, (idx, row) in enumerate(targets.iterrows()):
+                    raw_score = pd.to_numeric(
+                        str(row.get("면접_평균점수", "")).strip(), errors="coerce"
+                    ) if score_col_exists else None
+                    avg_score   = float(raw_score) if pd.notna(raw_score) else None
+                    score_label = get_score_label(avg_score)
+
                     try:
                         result = reanalyze_final(
-                            이름=str(row["이름"]),
-                            성격_판정=str(row["성격 판정"]),
-                            근거=str(row["근거 요약"]),
-                            면접_코멘트=str(row["면접_코멘트"]),
+                            이름=str(row["이름"]).strip(),
+                            성격_판정=str(row["성격 판정"]).strip(),
+                            근거=str(row["근거 요약"]).strip(),
+                            면접_코멘트=str(row["면접_코멘트"]).strip(),
                             model=selected_model,
+                            면접_평균점수=avg_score,
+                            score_label=score_label,
                         )
                         lines = result.splitlines()
                         df_final.at[idx, "최종_성격_판정"] = lines[0].strip()
