@@ -330,24 +330,25 @@ def _trim_tail(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ─── 지원자 이름 감지 상수 ──────────────────────────────────────
-_NAME_EXACT_RE  = re.compile(r"^[가-힣]{2,4}$")   # 열 스캔용 (exact match)
-_NAME_PREFIX_RE = re.compile(r"^[가-힣]{2,4}")    # 셀 파싱용 (prefix)
+_NAME_PREFIX_RE = re.compile(r"^[가-힣]{2,4}")    # 이름 감지용 (prefix — 뒤에 학과 등 붙어도 OK)
 # 이름 열 헤더 레이블: 이 값만 있는 행은 data_start 후보에서 제외
 _HEADER_NAMES   = frozenset({"이름", "성명", "성함", "지원자", "대상자"})
 
 
 def _find_name_col_idx(df_raw: pd.DataFrame) -> int | None:
     """
-    모든 열을 스캔해 한국어 이름(2~4자 한글, exact) 패턴이
+    모든 열을 스캔해 한국어 이름(2~4자 한글 시작, 뒤에 학과 등이 붙어도 OK) 패턴이
     가장 많이 나타나는 열 인덱스를 반환한다.
-    최소 2개 이상인 열에서만 선택 (1개는 헤더 레이블일 가능성).
+    헤더 레이블("이름","성명" 등)은 카운트에서 제외.
+    최소 2개 이상인 열에서만 선택.
     """
     best_col, best_count = None, 0
     for ci in range(len(df_raw.columns)):
         cnt = sum(
             1 for v in df_raw.iloc[:, ci].astype(str)
-            if bool(_NAME_EXACT_RE.match(v.strip()))
+            if bool(_NAME_PREFIX_RE.match(v.strip()))
             and v.strip() not in ("nan", "NaN", "None", "")
+            and v.strip() not in _HEADER_NAMES
         )
         if cnt > best_count:
             best_count, best_col = cnt, ci
@@ -412,7 +413,7 @@ def extract_all_comments(sheets: dict[str, pd.DataFrame]) -> pd.DataFrame:
         data_start: int | None = None
         for i in range(len(df_raw)):
             v = str(df_raw.iloc[i, name_col_raw]).strip()
-            if bool(_NAME_EXACT_RE.match(v)) and v not in _HEADER_NAMES:
+            if bool(_NAME_PREFIX_RE.match(v)) and v not in _HEADER_NAMES:
                 data_start = i
                 break
         if data_start is None:
