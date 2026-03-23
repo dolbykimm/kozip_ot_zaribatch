@@ -305,14 +305,14 @@ def _find_header_row(df_raw: pd.DataFrame, max_scan: int = 10) -> int:
 
 def _trim_tail(df: pd.DataFrame) -> pd.DataFrame:
     """
-    아래에서 위로 스캔해 '모든 열이 빈칸(NaN 또는 공백)'인 꼬리 행들을 제거한다.
-    중간에 있는 빈 행(섹션 구분선 등)은 건드리지 않는다.
+    위에서부터 순회해 '모든 열이 빈칸(NaN 또는 공백)'인 첫 행을 찾아
+    그 행부터 아래를 모두 제거한다.
+    → 데이터 블록 직후의 빈 행이 평가기준 표 등 푸터와의 경계선이 된다.
     """
-    for i in range(len(df) - 1, -1, -1):
-        row = df.iloc[i]
-        if not row.apply(lambda v: pd.isna(v) or str(v).strip() == "").all():
-            return df.iloc[: i + 1]
-    return df.iloc[:0]
+    for i in range(len(df)):
+        if df.iloc[i].apply(lambda v: pd.isna(v) or str(v).strip() == "").all():
+            return df.iloc[:i]
+    return df
 
 
 # ─── 지원자 행 감지 상수 ────────────────────────────────────────
@@ -372,69 +372,70 @@ def extract_all_comments(sheets: dict[str, pd.DataFrame]) -> pd.DataFrame:
     """
     모든 시트를 순회하며 (학번, 이름, 학과, 전화번호, 면접_통합데이터) 테이블을 반환한다.
 
+    ─ 핵심 구조 ─────────────────────────────────────────────────────────────
+    지원자 1명의 이름·학번이 병합 셀로 여러 행에 걸쳐 있고,
+    각 행마다 면접관 코멘트·점수가 따로 기록되는 비정형 채점표를 처리한다.
+
     처리 순서 (시트별)
-    ① 지원자 행 탐색  : 위에서부터 스캔 → 한국어 이름이 처음 나오는 행 = 데이터 시작
-                        직전 행 = 컬럼 헤더 (없으면 ROLE_KEYWORDS 기반 폴백)
-    ② 데이터 블록 추출 : 데이터 시작 ~ 첫 완전-빈 행 직전
-    ③ 식별자 열 ffill : 이름·학번 열의 빈칸 → 위 행 값으로 채움 (병합 셀 대응)
-    ④ 데이터 수집     : 메타 열 제외 나머지 전체(숫자·텍스트·점수 불문) →
-                        "[컬럼명] 값" 형식으로 이어붙여 면접_통합데이터 생성
-    ⑤ 이름·학번 기준 groupby → 여러 행/시트 데이터를 한 사람으로 합산
+    ① 지원자 행 탐색  : 위에서부터 스캔 → 이름+숫자가 같이 있는 첫 행 = 데이터 시작
+                        직전 행 = 컬럼 헤더
+    ② _trim_tail      : 데이터 시작 ~ 첫 완전-빈 행까지만 유지 (푸터 제거)
+    ③ 병합 셀 ffill   : 이름·학번 열의 NaN → 위 행 값으로 채움
+    ④ 행별 수집       : 메타 열 제외 나머지를 "[컬럼명] 값" 형식으로 이어붙임
+    ⑤ groupby         : 학번+이름 기준으로 여러 행 데이터를 한 사람으로 합산
+    ─────────────────────────────────────────────────────────────────────────
     """
     all_rows: list[dict] = []
 
     for sheet_name, df_raw in sheets.items():
-        # ① 위에서부터 스캔: 지원자 행이 처음 나타나는 위치
-        data_start = None
+
+        # ① 위에서부터 스캔: 지원자 행(이름+숫자)이 처음 나타나는 위치
+        data_start: int | None = None
         for i in range(len(df_raw)):
             if _looks_like_applicant_row(df_raw.iloc[i]):
                 data_start = i
                 break
-
         if data_start is None:
             continue
 
-        # 헤더 행 = data_start 직전 행 (없으면 keyword 기반 폴백)
+        # 헤더 행 = data_start 직전 행 (행이 없으면 ROLE_KEYWORDS 폴백)
         header_row = (data_start - 1) if data_start > 0 else _find_header_row(df_raw)
+        col_names  = df_raw.iloc[header_row].astype(str).str.strip().tolist()
 
-        # ② 컬럼명 추출 + 데이터 블록 슬라이싱
-        col_names = df_raw.iloc[header_row].astype(str).str.strip().tolist()
-        df_slice  = df_raw.iloc[data_start:].copy().reset_index(drop=True)
-        df_slice.columns = col_names
+        # 데이터 슬라이스: data_start 부터 끝까지, 헤더 컬럼명 적용
+        df = df_raw.iloc[data_start:].copy().reset_index(drop=True)
+        df.columns = col_names
 
-        # 첫 완전-빈 행까지만 (평가기준 표 등 하단 차단)
-        end_idx = len(df_slice)
-        for j in range(len(df_slice)):
-            if df_slice.iloc[j].apply(lambda v: pd.isna(v) or str(v).strip() == "").all():
-                end_idx = j
-                break
-        df = df_slice.iloc[:end_idx].copy()
-
+        # ② _trim_tail: 첫 완전-빈 행(= 푸터 경계선) 이하 제거
+        df = _trim_tail(df)
         if df.empty:
             continue
 
-        # 열 매핑 → 위치 인덱스 (모든 데이터 접근은 iloc)
+        # 열 매핑 → 위치 인덱스 (중복 컬럼명 안전을 위해 iloc만 사용)
         cols    = df.columns.tolist()
         col_map = resolve_columns(cols)
 
-        def _col_idx(mapped_name: str | None) -> int | None:
-            if mapped_name is None:
+        def _col_idx(role: str | None) -> int | None:
+            if role is None:
+                return None
+            mapped = col_map.get(role)
+            if mapped is None:
                 return None
             try:
-                return cols.index(mapped_name)
+                return cols.index(mapped)
             except ValueError:
                 return None
 
-        id_idx    = _col_idx(col_map.get("학번"))
-        name_idx  = _col_idx(col_map.get("이름"))
-        dept_idx  = _col_idx(col_map.get("학과"))
-        phone_idx = _col_idx(col_map.get("전화번호"))
+        id_idx    = _col_idx("학번")
+        name_idx  = _col_idx("이름")
+        dept_idx  = _col_idx("학과")
+        phone_idx = _col_idx("전화번호")
 
-        # ③ 식별자 열 ffill (병합 셀 대응)
-        for key_idx in [id_idx, name_idx]:
-            if key_idx is not None:
-                df.iloc[:, key_idx] = (
-                    df.iloc[:, key_idx]
+        # ③ 병합 셀 ffill: 이름·학번 열의 NaN을 위 행 값으로 채움
+        for ki in [id_idx, name_idx]:
+            if ki is not None:
+                df.iloc[:, ki] = (
+                    df.iloc[:, ki]
                     .replace(r"^\s*$", pd.NA, regex=True)
                     .ffill()
                 )
@@ -444,35 +445,37 @@ def extract_all_comments(sheets: dict[str, pd.DataFrame]) -> pd.DataFrame:
 
         # ④ 행별 데이터 수집 — 모든 셀 접근은 df.iloc[row_i, col_i]
         for row_i in range(len(df)):
+
             def _get(idx: int | None) -> str:
                 if idx is None:
                     return ""
-                val = df.iloc[row_i, idx]
-                return "" if pd.isna(val) else str(val).strip()
+                v = df.iloc[row_i, idx]
+                return "" if pd.isna(v) else str(v).strip()
 
-            학번 = _get(id_idx)
-            # 이름 셀에 학과·학번이 붙어있을 수 있으므로 분리
+            학번_raw = _get(id_idx)
             이름_raw = _get(name_idx)
-            이름, _extra_dept, _extra_id = _parse_name_cell(이름_raw)
-            학과 = _get(dept_idx) or _extra_dept   # 전용 열 없으면 이름 셀에서 보완
+            # 이름 셀에 학과·학번이 붙어있을 수 있으므로 분리
+            이름, _xdept, _xid = _parse_name_cell(이름_raw)
+            학과 = _get(dept_idx) or _xdept      # 전용 열 없으면 이름 셀에서 보완
             전화 = _get(phone_idx)
-            if not 학번 and _extra_id:
-                학번 = _extra_id                   # 이름 셀에서 학번 보완
+            학번 = 학번_raw or _xid              # 전용 열 없으면 이름 셀에서 보완
+
             if not 이름 and not 학번:
                 continue
 
-            parts = []
-            for col_i in data_idxs:
-                val = df.iloc[row_i, col_i]
-                if pd.notna(val) and str(val).strip() not in ("", "nan", "NaN", "None"):
-                    parts.append(f"[{str(cols[col_i]).strip()}] {str(val).strip()}")
-            text = "\n".join(parts)
-            if not text:
+            # 메타 열 제외 나머지 전부 수집 (점수·코멘트·비고 등)
+            parts = [
+                f"[{str(cols[ci]).strip()}] {str(df.iloc[row_i, ci]).strip()}"
+                for ci in data_idxs
+                if pd.notna(df.iloc[row_i, ci])
+                and str(df.iloc[row_i, ci]).strip() not in ("", "nan", "NaN", "None")
+            ]
+            if not parts:
                 continue
 
             all_rows.append({
                 "학번": 학번, "이름": 이름, "학과": 학과, "전화번호": 전화,
-                "면접_통합데이터": text,
+                "면접_통합데이터": "\n".join(parts),
             })
 
     if not all_rows:
