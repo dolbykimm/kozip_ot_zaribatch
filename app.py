@@ -7,6 +7,7 @@ import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 from groq import Groq
+import openpyxl
 
 from streamlit_gsheets import GSheetsConnection
 
@@ -211,10 +212,17 @@ def assign_seats(
 
 
 def extract_interview_score(text: str) -> str:
-    """면접 통합데이터에서 [총점] 계열 값을 추출해 반환. 못 찾으면 빈 문자열."""
+    """면접 통합데이터에서 점수 숫자를 추출해 반환. 못 찾으면 빈 문자열.
+
+    점수는 한 자리 정수(음수 포함)가 대부분이므로
+    [총점]/[합계]/[점수] 레이블 뒤에 오는 -?\\d+ 패턴을 우선 찾는다.
+    레이블이 없으면 빈 문자열 반환.
+    """
     s = str(text)
-    # [총점] 5, [총점] -1, [합계] 3 등
-    m = re.search(r"\[(총점|합계|점수)\]\s*(-?[0-9]+(?:\.[0-9]+)?)", s)
+    m = re.search(
+        r"\[(총점|합계|점수|평균|score|total)\]\s*(-?[0-9]+(?:\.[0-9]+)?)",
+        s, re.IGNORECASE
+    )
     return m.group(2) if m else ""
 
 
@@ -974,10 +982,25 @@ with tab2:
     )
 
     if uploaded_interview is not None:
-        # ── ① 다중 시트 읽기 ─────────────────────────────────
-        sheets: dict[str, pd.DataFrame] = pd.read_excel(
-            uploaded_interview, sheet_name=None
-        )
+        # ── ① 다중 시트 읽기 (수식의 결괏값만 강제로 읽어오기) ───────────────────
+        import openpyxl
+        
+        # data_only=True 옵션을 주어 수식을 무시하고 엑셀 화면에 보이는 최종 결괏값만 가져옵니다.
+        wb = openpyxl.load_workbook(uploaded_interview, data_only=True)
+        sheets: dict[str, pd.DataFrame] = {}
+        
+        for sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+            # 시트의 데이터를 추출 (수식 텍스트가 아닌 계산된 value만 가져옴)
+            data = list(ws.values)
+            
+            if data and len(data) > 0:
+                # 첫 번째 행을 컬럼(헤더)으로, 나머지를 데이터로 DataFrame 생성
+                df_s = pd.DataFrame(data[1:], columns=data[0])
+            else:
+                df_s = pd.DataFrame()
+            sheets[sheet_name] = df_s
+
         st.success(
             f"파일 로드 완료 — {len(sheets)}개 시트: **{', '.join(sheets.keys())}**"
         )
