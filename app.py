@@ -211,17 +211,10 @@ def assign_seats(
 
 
 def extract_interview_score(text: str) -> str:
-    """면접 통합데이터에서 점수 숫자를 추출해 반환. 못 찾으면 빈 문자열.
-
-    점수는 한 자리 정수(음수 포함)가 대부분이므로
-    [총점]/[합계]/[점수] 레이블 뒤에 오는 -?\\d+ 패턴을 우선 찾는다.
-    레이블이 없으면 빈 문자열 반환.
-    """
+    """면접 통합데이터에서 [총점] 계열 값을 추출해 반환. 못 찾으면 빈 문자열."""
     s = str(text)
-    m = re.search(
-        r"\[(총점|합계|점수|평균|score|total)\]\s*(-?[0-9]+(?:\.[0-9]+)?)",
-        s, re.IGNORECASE
-    )
+    # [총점] 5, [총점] -1, [합계] 3 등
+    m = re.search(r"\[(총점|합계|점수)\]\s*(-?[0-9]+(?:\.[0-9]+)?)", s)
     return m.group(2) if m else ""
 
 
@@ -497,8 +490,10 @@ def extract_all_comments(sheets: dict[str, pd.DataFrame]) -> pd.DataFrame:
         dept_ci_list  = [ci for ci, c in enumerate(header_cells) if "학과" in c or "부서" in c or "전공" in c]
         phone_ci_list = [ci for ci, c in enumerate(header_cells) if "전화" in c or "연락" in c]
         id_ci    = id_ci_list[0]    if id_ci_list    else None
-        dept_ci  = dept_ci_list[0]  if dept_ci_list  else None
-        phone_ci = phone_ci_list[0] if phone_ci_list else None
+        dept_ci   = dept_ci_list[0]  if dept_ci_list  else None
+        phone_ci  = phone_ci_list[0] if phone_ci_list else None
+        score_cis = [ci for ci, c in enumerate(header_cells)
+                     if any(kw in c for kw in ("총점", "합계", "점수"))]
 
         def _flush():
             """현재 지원자 데이터를 all_rows 에 저장."""
@@ -548,6 +543,11 @@ def extract_all_comments(sheets: dict[str, pd.DataFrame]) -> pd.DataFrame:
                     if oci < len(row_cells) and row_cells[oci]:
                         col_label = header_cells[oci] if oci < len(header_cells) else f"col{oci}"
                         current_parts.append(f"[{col_label}] {row_cells[oci]}")
+                # 총점 계열은 의견 열 유무와 무관하게 항상 수집
+                for sci in score_cis:
+                    if sci not in opine_cis and sci < len(row_cells) and row_cells[sci]:
+                        col_label = header_cells[sci] if sci < len(header_cells) else f"col{sci}"
+                        current_parts.append(f"[{col_label}] {row_cells[sci]}")
             else:
                 # 의견 열이 없으면: 이름/id/학과/전화 외 모든 비어있지 않은 셀 수집
                 skip_cis = {c for c in [name_ci, id_ci, dept_ci, phone_ci] if c is not None}
