@@ -163,7 +163,6 @@ def assign_seats(
     num_people: int,
     personality_mode: str,
     student_id_policy: str,
-    late_names: list[str] | None = None,
     model: str = "llama-3.3-70b-versatile",
 ) -> pd.DataFrame:
     """
@@ -243,6 +242,20 @@ def assign_seats(
     merged_idxs.extend(e_idxs[len(i_idxs):])
     merged_idxs.extend(i_idxs[len(e_idxs):])
 
+    # 늦참자를 큐 끝에 몰리지 않게 균등 삽입
+    late_flag = work.get("늦참자", pd.Series(False, index=work.index)).fillna(False).astype(bool)
+    late_set  = set(work[late_flag].index.tolist())
+    if late_set:
+        regular = [idx for idx in merged_idxs if idx not in late_set]
+        lates   = [idx for idx in merged_idxs if idx in late_set]
+        n_r, n_l = len(regular), len(lates)
+        # step: 정규 인원 사이에 등간격으로 삽입
+        step = (n_r + 1) / (n_l + 1)
+        for i, li in enumerate(lates):
+            pos = int(step * (i + 1)) + i
+            regular.insert(min(pos, len(regular)), li)
+        merged_idxs = regular
+
     for pos, idx in enumerate(merged_idxs):
         tables[pos % num_tables].append(idx)
 
@@ -250,47 +263,6 @@ def assign_seats(
     for t_num, members in enumerate(tables):
         for idx in members:
             work.at[idx, "테이블_번호"] = t_num + 1
-
-    # ── 늦참자 배치 ──────────────────────────────────────────────
-    if late_names:
-        # 늦참자 성별 LLM 추정 (기존 배치와 별도 호출)
-        late_gender_map = estimate_genders_batch(tuple(late_names), model)
-
-        # 현재 테이블별 인원 수 계산
-        table_sizes: dict[int, int] = {
-            t_num + 1: len(members) for t_num, members in enumerate(tables)
-        }
-
-        late_rows = []
-        for lname in late_names:
-            # 가장 인원이 적은 테이블 선택
-            target_t = min(table_sizes, key=table_sizes.__getitem__)
-            table_sizes[target_t] += 1
-
-            # 해당 테이블의 현재 E/I 비율로 늦참자 EI 결정
-            cur_members = work[work["테이블_번호"] == target_t]
-            e_cnt = (cur_members["EI"] == "E").sum()
-            i_cnt = (cur_members["EI"] == "I").sum()
-            late_ei = "E" if e_cnt <= i_cnt else "I"
-
-            late_rows.append({
-                "이름":        lname,
-                "학과":        "미상",
-                "학번":        "",
-                "성격 판정":   "외향형" if late_ei == "E" else "내향형",
-                "근거 요약":   "늦참자",
-                "성격_키워드": "",
-                "성별":        late_gender_map.get(lname, "미상"),
-                "EI":          late_ei,
-                "학번_연도":   "미상",
-                "테이블_번호": target_t,
-                "늦참자":      True,
-            })
-
-            # work 에 바로 추가해야 다음 늦참자가 최신 인원 수 기준으로 배치됨
-            work = pd.concat(
-                [work, pd.DataFrame([late_rows[-1]])], ignore_index=True
-            )
 
     return work.sort_values("테이블_번호").reset_index(drop=True)
 
@@ -1351,16 +1323,40 @@ with tab3:
 
         if st.button("자리 배치하기!", type="primary", disabled=not has_data):
             df_src = st.session_state["df_personality"].copy()
+
+            # 늦참자 행 미리 추가 (알고리즘이 처음부터 포함해 최대 인원 초과 없음)
             late_names = [
                 n.strip()
                 for n in st.session_state.get("late_arrivals_input", "").splitlines()
                 if n.strip()
             ]
+            if late_names:
+                # E/I 는 전체 비율 보고 교대 배정 (늦참 여부와 무관하게 균형 유지)
+                e_cnt = df_src["성격 판정"].str.contains("외향", na=False).sum()
+                i_cnt = len(df_src) - e_cnt
+                late_rows_data = []
+                for name in late_names:
+                    ei_val = "외향형" if e_cnt <= i_cnt else "내향형"
+                    if ei_val == "외향형":
+                        e_cnt += 1
+                    else:
+                        i_cnt += 1
+                    late_rows_data.append({
+                        "이름":        name,
+                        "학과":        "미상",
+                        "학번":        "",
+                        "성격 판정":   ei_val,
+                        "근거 요약":   "늦참자",
+                        "성격_키워드": "",
+                        "늦참자":      True,
+                    })
+                df_src = pd.concat(
+                    [df_src, pd.DataFrame(late_rows_data)], ignore_index=True
+                )
 
             with st.spinner("배치 중..."):
                 df_seated = assign_seats(
                     df_src, num_people, personality, student_id_policy,
-                    late_names=late_names or None,
                     model=selected_model,
                 )
 
