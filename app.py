@@ -877,12 +877,12 @@ with st.sidebar:
 
     st.divider()
     st.subheader("📋 진행 현황")
-    step1_done = "df_personality" in st.session_state
-    step2_done = "df_merged"      in st.session_state
+    step1_done = "df_resume_raw"  in st.session_state
+    step2_done = "df_personality" in st.session_state
     step3_done = "df_seated"      in st.session_state
     st.markdown(
-        f"{'✅' if step1_done else '⬜'} STEP 1 · 자소서 분석\n\n"
-        f"{'✅' if step2_done else '⬜'} STEP 2 · 면접표 병합\n\n"
+        f"{'✅' if step1_done else '⬜'} STEP 1 · 파일 업로드\n\n"
+        f"{'✅' if step2_done else '⬜'} STEP 2 · 분석 완료\n\n"
         f"{'✅' if step3_done else '⬜'} STEP 3 · 자리배치"
     )
 
@@ -928,9 +928,9 @@ with st.sidebar:
 
 
 # ── 앱 소개 ──────────────────────────────────────────────────
-with st.expander("💡 처음 오셨나요? 사용 방법을 확인하세요!", expanded=False):
+with st.expander("💡 시작하기 전에 읽어주세요!", expanded=False):
     st.markdown("""
-#### 이 앱은 뭐 하는 건가요?
+#### 이 앱은 대체 뭐 하는 건가요?
 자기소개서와 면접 결과를 바탕으로 **OT 자리를 자동으로 배치**해 드려요.
 외향·내향, 학번, 성별이 골고루 섞이도록 AI가 계산해요.
 
@@ -938,73 +938,204 @@ with st.expander("💡 처음 오셨나요? 사용 방법을 확인하세요!", 
 
 #### 사용 순서
 
-| 단계 | 하는 일 | 필요한 파일 |
-|------|---------|------------|
-| **📝 STEP 1** | 자기소개서 업로드 → AI가 외향/내향 성격 분석 | 자소서 엑셀 |
-| **📊 STEP 2** | 면접 점수표 업로드 → 코멘트 반영해 성격 재분석 | 면접표 엑셀 *(선택)* |
-| **🪑 STEP 3** | 배치 설정 후 버튼 클릭 → 자리 배치 완성! | — |
+| 단계 | 하는 일 |
+|------|---------|
+| **📁 STEP 1 · 준비** | 파일을 한 번에 다 올리고, 임원진·늦참자·취소자를 입력해요 |
+| **🔍 STEP 2 · 분석** | 취소자를 제외한 명단을 확인한 뒤 분석 버튼을 딸깍딸깍 눌러요 |
+| **🪑 STEP 3 · 자리배치** | 설정하고 버튼 누르면 끝! |
 
-> 💡 면접표(STEP 2)가 없어도 STEP 1 → STEP 3 만으로 배치 가능해요!
+> 💡 면접표가 없어도 STEP 1 → STEP 2(자소서 분석만) → STEP 3 으로 배치 가능해요!
 
 ---
 
 #### 자주 묻는 것들
-- **임원진·기존부원은요?** → STEP 3에서 이름 직접 입력하면 돼요. 자동으로 외향으로 분류돼요.
-- **늦참자가 있어요** → STEP 3에서 이름 입력하면 나머지 인원과 골고루 섞어 배치해요.
-- **Groq API 키는 왼쪽 사이드바** ⬅ 에 입력하세요. (AI 기능 사용 시 필요)
+- **임원진·기존부원은요?** → STEP 1에서 이름 직접 입력. 자동으로 외향으로 분류돼요.
+- **늦참자가 있어요** → STEP 1에서 이름 입력. 나머지 인원과 골고루 섞어 배치돼요.
+- **참석 취소자가 생겼어요** → STEP 1 취소자 칸에 이름 입력. 분석과 배치 모두에서 제외돼요.
+- **Groq API 키는 왼쪽 사이드바** ⬅ 에서 확인하세요.
 """)
 
 tab1, tab2, tab3 = st.tabs([
-    "📝  STEP 1 · 자소서 분석",
-    "📊  STEP 2 · 면접표 병합",
+    "📁  STEP 1 · 준비",
+    "🔍  STEP 2 · 분석",
     "🪑  STEP 3 · 자리배치",
 ])
 
-# ── 1단계: 자소서 분석 ────────────────────────────────────────
+# ── 1단계: 파일 업로드 & 수동 입력 ───────────────────────────
 with tab1:
-    st.header("📝 STEP 1 · 자소서 분석")
-    st.caption("지원자들의 자기소개서를 AI가 읽고 외향형/내향형을 판단해요.")
-    uploaded_resume = st.file_uploader(
-        "자기소개서 엑셀 파일을 올려주세요",
-        type=["xlsx", "xls"],
-        key="resume",
-    )
+    st.header("📁 STEP 1 · 준비")
+    st.caption("파일을 모두 올리고 추가 정보를 입력해 주세요. 다 됐으면 STEP 2로 이동하세요!")
 
-    if uploaded_resume is not None:
-        df_resume = pd.read_excel(uploaded_resume)
-        st.success(f"총 {len(df_resume)}명의 데이터를 불러왔어요!")
-        st.dataframe(df_resume, use_container_width=True)
+    col_files, col_manual = st.columns([1, 1])
+
+    with col_files:
+        st.subheader("파일 업로드")
+
+        _uploaded_resume = st.file_uploader(
+            "📄 자기소개서 엑셀 (필수)",
+            type=["xlsx", "xls"],
+            key="file_resume",
+            help="지원자의 자기소개서가 담긴 엑셀 파일을 올려주세요.",
+        )
+        if _uploaded_resume is not None:
+            if st.session_state.get("_resume_file_name") != _uploaded_resume.name:
+                _rb = _uploaded_resume.read()
+                st.session_state["_resume_bytes"]     = _rb
+                st.session_state["_resume_file_name"] = _uploaded_resume.name
+                st.session_state["df_resume_raw"]     = pd.read_excel(io.BytesIO(_rb))
+                for _k in ["df_personality", "df_merged", "df_comments", "ambiguous",
+                            "sheet_inference", "df_seated"]:
+                    st.session_state.pop(_k, None)
+            st.success(f"자소서 파일 업로드 완료! ({len(st.session_state['df_resume_raw'])}명)")
 
         st.divider()
-        st.subheader("어떤 칸이 뭔지 확인해 주세요")
+
+        _uploaded_interview = st.file_uploader(
+            "📊 면접 점수표 엑셀 (선택)",
+            type=["xlsx", "xls"],
+            key="file_interview",
+            help="면접 코멘트와 점수가 담긴 엑셀 파일이에요. 없으면 건너뛰세요.",
+        )
+        if _uploaded_interview is not None:
+            if st.session_state.get("_interview_file_name") != _uploaded_interview.name:
+                _raw = _uploaded_interview.read()
+                _wb  = openpyxl.load_workbook(io.BytesIO(_raw), data_only=True)
+                _sheets: dict[str, pd.DataFrame] = {}
+                for _sname in _wb.sheetnames:
+                    _ws   = _wb[_sname]
+                    _rows = [[cell.value for cell in row] for row in _ws.iter_rows()]
+                    _sheets[_sname] = pd.DataFrame(_rows) if _rows else pd.DataFrame()
+                st.session_state["interview_sheets"]     = _sheets
+                st.session_state["_interview_file_name"] = _uploaded_interview.name
+                for _k in ["df_comments", "df_merged", "ambiguous", "sheet_inference", "df_seated"]:
+                    st.session_state.pop(_k, None)
+            _n_sheets = len(st.session_state.get("interview_sheets", {}))
+            st.success(f"면접 파일 업로드 완료! (시트 {_n_sheets}개)")
+
+        st.divider()
+
+        _uploaded_roster = st.file_uploader(
+            "📋 참가자 명단 (선택, txt 또는 엑셀)",
+            type=["txt", "xlsx", "xls"],
+            key="file_roster",
+            help="참석자 이름 목록 파일이에요. 없으면 자소서 파일의 이름 목록을 쓸게요.",
+        )
+        if _uploaded_roster is not None:
+            if st.session_state.get("_roster_file_name") != _uploaded_roster.name:
+                _df_roster = parse_roster_file(_uploaded_roster)
+                st.session_state["df_roster"]         = _df_roster
+                st.session_state["_roster_file_name"] = _uploaded_roster.name
+            _df_r = st.session_state.get("df_roster")
+            if _df_r is not None and not _df_r.empty:
+                st.success(f"참가자 명단 {len(_df_r)}명 인식 완료!")
+                with st.expander("명단 미리보기"):
+                    st.dataframe(_df_r, use_container_width=True)
+            else:
+                st.warning("명단을 인식하지 못했어요. 파일 형식을 확인해 주세요.")
+
+    with col_manual:
+        st.subheader("추가 인원 & 조정")
+
+        st.markdown("**👑 임원진 / 기존 부원**")
+        st.caption("자소서를 제출하지 않은 임원진·기존 부원. 모두 외향형으로 처리돼요.")
+        st.text_area(
+            "임원진/기존부원 이름",
+            placeholder="회장 홍길동\n부회장 김철수\n이영희",
+            key="officer_input",
+            label_visibility="collapsed",
+            height=90,
+        )
+
+        st.divider()
+
+        st.markdown("**⏰ 늦참자**")
+        st.caption("나중에 도착하는 사람. 나머지 참가자와 골고루 섞어 배치돼요.")
+        st.text_area(
+            "늦참자 이름",
+            placeholder="홍길동\n김철수",
+            key="late_arrivals_input",
+            label_visibility="collapsed",
+            height=90,
+        )
+
+        st.divider()
+
+        st.markdown("**❌ 취소자**")
+        st.caption("참석하겠다고 했다가 취소한 사람. 분석과 자리배치 모두에서 제외돼요.")
+        st.text_area(
+            "취소자 이름",
+            placeholder="홍길동\n김철수",
+            key="cancellation_input",
+            label_visibility="collapsed",
+            height=90,
+        )
+
+    # ── 준비 현황 요약 ──────────────────────────────────────
+    st.divider()
+    _cancel_set = {
+        n.strip()
+        for n in st.session_state.get("cancellation_input", "").splitlines()
+        if n.strip()
+    }
+    _checks = []
+    if "df_resume_raw" in st.session_state:
+        _checks.append(f"✅ 자소서 파일 — {len(st.session_state['df_resume_raw'])}명")
+    else:
+        _checks.append("⬜ 자소서 파일 **(필수)**")
+    if "interview_sheets" in st.session_state:
+        _checks.append(f"✅ 면접 파일 — 시트 {len(st.session_state['interview_sheets'])}개")
+    else:
+        _checks.append("⬜ 면접 파일 (선택)")
+    if _cancel_set:
+        _checks.append(f"❌ 취소자 {len(_cancel_set)}명 제외 예정")
+    for _c in _checks:
+        st.markdown(_c)
+    if "df_resume_raw" in st.session_state:
+        st.info("준비 완료! **STEP 2** 탭으로 이동해서 분석을 시작하세요.")
+
+
+# ── 2단계: 분석 ───────────────────────────────────────────────
+with tab2:
+    st.header("🔍 STEP 2 · 분析")
+
+    if "df_resume_raw" not in st.session_state:
+        st.warning("먼저 **STEP 1**에서 자소서 파일을 올려주세요!")
+    else:
+        df_resume = st.session_state["df_resume_raw"]
+
+        _cancel_set2 = {
+            n.strip()
+            for n in st.session_state.get("cancellation_input", "").splitlines()
+            if n.strip()
+        }
+
+        # ── 열 이름 확인 ────────────────────────────────────
+        st.subheader("열 이름 확인")
         st.caption("자동으로 찾아봤는데, 틀린 게 있으면 직접 바꿔주세요.")
 
-        auto_map = resolve_columns(list(df_resume.columns))
-        col_options = [None] + list(df_resume.columns)  # None = 미선택
-
+        auto_map    = resolve_columns(list(df_resume.columns))
+        col_options = [None] + list(df_resume.columns)
         role_labels = {
             "학과": "학과 / 전공",
             "학번": "학번 / 학생번호",
             "이름": "이름 / 성명",
         }
 
-        # ── 기본 정보 열 3개: selectbox ──────────────────────────
         confirmed_map: dict[str, str | None] = {}
         map_cols = st.columns(3)
-        for i, (role, label) in enumerate(role_labels.items()):
-            detected = auto_map[role]
-            idx = col_options.index(detected) if detected in col_options else 0
-            chosen = map_cols[i].selectbox(
-                label,
+        for _i, (_role, _label) in enumerate(role_labels.items()):
+            _detected = auto_map[_role]
+            _idx = col_options.index(_detected) if _detected in col_options else 0
+            _chosen = map_cols[_i].selectbox(
+                _label,
                 options=col_options,
-                index=idx,
+                index=_idx,
                 format_func=lambda x: "— 선택 안 됨 —" if x is None else x,
-                key=f"col_map_{role}",
+                key=f"col_map_{_role}",
             )
-            confirmed_map[role] = chosen
+            confirmed_map[_role] = _chosen
 
-        # ── 자소서 열: 기본 정보 열을 제외한 나머지를 기본 선택 ──
-        info_cols = {c for c in confirmed_map.values() if c is not None}
+        info_cols      = {c for c in confirmed_map.values() if c is not None}
         remaining_cols = [c for c in df_resume.columns if c not in info_cols]
 
         st.markdown("**자기소개서 내용이 있는 칸을 골라주세요** (여러 개 선택 가능 — 선택한 순서대로 AI에 전달돼요)")
@@ -1016,22 +1147,38 @@ with tab1:
             label_visibility="collapsed",
         )
 
+        # ── 취소자 필터링 ────────────────────────────────────
+        df_resume_filtered = df_resume.copy()
+        if _cancel_set2 and confirmed_map.get("이름"):
+            _name_col = confirmed_map["이름"]
+            _keep = ~df_resume_filtered[_name_col].astype(str).str.strip().isin(_cancel_set2)
+            _removed = int((~_keep).sum())
+            df_resume_filtered = df_resume_filtered[_keep].reset_index(drop=True)
+            if _removed > 0:
+                st.info(f"취소자 {_removed}명이 제외됐어요. 분석 대상: **{len(df_resume_filtered)}명**")
+
+        # ── 분析 대상 명단 미리보기 ──────────────────────────
+        st.subheader("분析 대상 명단")
+        st.dataframe(df_resume_filtered, use_container_width=True)
+
         unresolved = [lbl for role, lbl in role_labels.items() if confirmed_map[role] is None]
+
+        st.divider()
+
+        # ── ① 자소서 성격 분析 ──────────────────────────────
+        st.subheader("① 자소서 성격 분析")
+
         if unresolved:
-            st.warning(f"아직 연결 안 된 항목이 있어요: **{', '.join(unresolved)}** — 드롭다운에서 골라주세요!")
+            st.warning(f"아직 연결 안 된 항목: **{', '.join(unresolved)}** — 위 드롭다운에서 골라주세요!")
         elif not essay_cols:
             st.warning("자기소개서 내용이 있는 칸을 하나 이상 골라야 해요!")
         else:
-            st.divider()
-            st.subheader("AI로 성격 분석하기")
-
-            if st.button("분석 시작!", type="primary", key="btn_analyze"):
+            if st.button("자소서 성격 분析 시작", type="primary", key="btn_analyze"):
                 results = []
-                progress = st.progress(0, text="분석 중...")
-                total = len(df_resume)
+                progress = st.progress(0, text="분析 중...")
+                total = len(df_resume_filtered)
 
-                for i, row in df_resume.iterrows():
-                    # 여러 자소서 열을 "[열이름]\n내용" 형식으로 이어붙임
+                for _i, (_, row) in enumerate(df_resume_filtered.iterrows()):
                     combined_essay = "\n\n".join(
                         f"[{col}]\n{row[col]}"
                         for col in essay_cols
@@ -1052,254 +1199,210 @@ with tab1:
                         판정, 근거 = "오류", str(e)
 
                     results.append({
-                        "학과": row[confirmed_map["학과"]],
-                        "학번": row[confirmed_map["학번"]],
-                        "이름": row[confirmed_map["이름"]],
+                        "학과":    row[confirmed_map["학과"]],
+                        "학번":    row[confirmed_map["학번"]],
+                        "이름":    row[confirmed_map["이름"]],
                         "성격 판정": 판정,
                         "근거 요약": 근거,
                     })
-                    progress.progress((i + 1) / total, text=f"분석 중... ({i + 1}/{total})")
+                    progress.progress((_i + 1) / total, text=f"분析 중... ({_i + 1}/{total})")
 
                 progress.empty()
                 df_result = pd.DataFrame(results)
                 st.session_state["df_personality"] = df_result
-                st.success("분석 완료!")
-                st.dataframe(df_result, use_container_width=True)
+                st.success("분析 완료!")
 
-            elif "df_personality" in st.session_state:
+            if "df_personality" in st.session_state:
                 st.dataframe(st.session_state["df_personality"], use_container_width=True)
-    else:
-        st.info("자기소개서 엑셀 파일을 올리면 내용이 여기에 나타나요.")
 
-# ── 2단계: 면접표 병합 ────────────────────────────────────────
-with tab2:
-    st.header("📊 STEP 2 · 면접표 병합")
-    st.caption("면접 코멘트·점수를 반영해 성격 판단을 더 정확하게 다듬어요. 면접표가 없으면 이 단계는 건너뛰어도 돼요.")
-
-    uploaded_interview = st.file_uploader(
-        "면접 점수표 엑셀 파일을 올려주세요",
-        type=["xlsx", "xls"],
-        key="interview",
-    )
-
-    if uploaded_interview is not None:
-        # ── ① 다중 시트 읽기 (data_only=True 로 수식 결과값을 읽음) ──
-        _raw_bytes = uploaded_interview.read()
-        _wb = openpyxl.load_workbook(io.BytesIO(_raw_bytes), data_only=True)
-        sheets: dict[str, pd.DataFrame] = {}
-        for _sname in _wb.sheetnames:
-            _ws  = _wb[_sname]
-            _rows = [[cell.value for cell in row] for row in _ws.iter_rows()]
-            sheets[_sname] = pd.DataFrame(_rows) if _rows else pd.DataFrame()
-        st.success(
-            f"파일을 불러왔어요! 시트 {len(sheets)}개: **{', '.join(sheets.keys())}**"
-        )
-        for sheet_name, df_s in sheets.items():
-            with st.expander(f"시트 미리보기: {sheet_name}  ({len(df_s)}행 × {len(df_s.columns)}열)"):
-                st.dataframe(df_s, use_container_width=True)
-
-        st.divider()
-
-        # ── ② LLM 시트 구조 추론 ─────────────────────────────
-        st.subheader("엑셀 구조 파악하기")
-        if st.button("AI로 구조 분석", key="btn_infer"):
-            with st.spinner("LLM이 시트 구조를 분석 중..."):
-                sheet_summary = build_sheets_summary(sheets)
-                inference     = infer_sheet_structure(sheet_summary, selected_model)
-            st.session_state["sheet_inference"] = inference
-
-        if "sheet_inference" in st.session_state:
-            st.info(st.session_state["sheet_inference"])
-
-        st.divider()
-
-        # ── ③ 면접 데이터 추출 + 다중 조건 병합 ──────────────
-        st.subheader("면접 데이터 가져오기")
-
-        has_personality = "df_personality" in st.session_state
-        if not has_personality:
-            st.warning("먼저 1단계에서 자기소개서 분석을 완료해 주세요!")
-
-        if st.button("합치기", type="primary", disabled=not has_personality, key="btn_merge"):
-            with st.spinner("면접 코멘트 추출 중..."):
-                df_comments = extract_all_comments(sheets)
-
-            df_base = st.session_state["df_personality"].copy()
-            df_merged, ambiguous = smart_merge(df_base, df_comments)
-
-            matched = df_merged["면접_통합데이터"].notna().sum()
-            st.session_state["df_merged"]   = df_merged
-            st.session_state["ambiguous"]   = ambiguous
-            st.session_state["df_comments"] = df_comments
-
-            if ambiguous:
-                st.warning(
-                    f"자동 연결 완료 — {matched}/{len(df_merged)}명 | "
-                    f"같은 이름이 **{len(ambiguous)}건** 있어요. 아래에서 직접 연결해 주세요! ↓"
-                )
-            else:
-                st.success(f"완료! {matched} / {len(df_merged)}명 면접 코멘트 연결됐어요.")
-
-        # ── 동명이인 수동 매칭 구역 ──────────────────────────
-        if st.session_state.get("ambiguous"):
-            ambiguous_cases = st.session_state["ambiguous"]
+        # ── ② 면접표 병합 ────────────────────────────────────
+        if "interview_sheets" in st.session_state:
+            sheets = st.session_state["interview_sheets"]
             st.divider()
-            st.subheader("같은 이름 직접 연결하기")
-            st.caption(
-                "같은 이름이 여러 명이에요! 각 면접 기록이 누구 건지 직접 골라주세요."
-            )
+            st.subheader("② 면접표 병합")
 
-            # 이름별로 그룹화
-            from collections import defaultdict
-            groups: dict[str, list[dict]] = defaultdict(list)
-            for case in ambiguous_cases:
-                groups[case["name"]].append(case)
+            for sheet_name, df_s in sheets.items():
+                with st.expander(f"시트 미리보기: {sheet_name}  ({len(df_s)}행 × {len(df_s.columns)}열)"):
+                    st.dataframe(df_s, use_container_width=True)
 
-            for name, cases in groups.items():
-                st.markdown(f"### 동명이인: **{name}** ({len(cases)}건)")
-                candidates = cases[0]["candidates"]
-                cand_options = ["— 매칭 안 함 —"] + [c["label"] for c in candidates]
+            if st.button("AI로 시트 구조 분析", key="btn_infer"):
+                with st.spinner("LLM이 시트 구조를 분析 중..."):
+                    sheet_summary = build_sheets_summary(sheets)
+                    inference     = infer_sheet_structure(sheet_summary, selected_model)
+                st.session_state["sheet_inference"] = inference
 
-                for case in cases:
-                    # 면접 기록 식별 정보 구성
-                    raw  = case.get("원본이름", name)
-                    dept = case.get("학과", "")
-                    sid  = case.get("학번", "")
-                    info_parts = [f"원본: **{raw}**"]
-                    if dept: info_parts.append(f"학과: {dept}")
-                    if sid:  info_parts.append(f"학번: {sid}")
-                    info_str = " / ".join(info_parts)
+            if "sheet_inference" in st.session_state:
+                st.info(st.session_state["sheet_inference"])
 
-                    # 코멘트 미리보기 (앞 150자)
-                    preview = case["comment_text"][:150].replace("\n", " ")
-                    if len(case["comment_text"]) > 150:
-                        preview += "…"
+            _has_personality = "df_personality" in st.session_state
+            if not _has_personality:
+                st.warning("먼저 위 ①에서 자소서 성격 분析을 완료해 주세요!")
 
-                    with st.container(border=True):
-                        st.markdown(info_str)
-                        if not sid:
-                            st.warning("학번 정보가 없어요 — 이름이나 코멘트 내용으로 구분해 주세요.")
-                        st.caption(preview)
-                        st.selectbox(
-                            "→ 누구의 면접 기록인가요?",
-                            options=cand_options,
-                            key=f"manual_{case['comment_idx']}",
-                        )
+            if st.button("면접표 병합하기", type="primary", disabled=not _has_personality, key="btn_merge"):
+                with st.spinner("면접 코멘트 추출 중..."):
+                    df_comments = extract_all_comments(sheets)
 
-                # 같은 이름 그룹 내 중복 배정 경고
-                chosen_labels = [
-                    st.session_state.get(f"manual_{c['comment_idx']}", "— 매칭 안 함 —")
-                    for c in cases
-                ]
-                non_skip = [l for l in chosen_labels if l != "— 매칭 안 함 —"]
-                if len(non_skip) != len(set(non_skip)):
-                    st.warning("같은 사람한테 두 개 이상 연결됐어요! 확인해 주세요.")
+                df_base = st.session_state["df_personality"].copy()
+                df_merged_new, ambiguous_new = smart_merge(df_base, df_comments)
+
+                matched = df_merged_new["면접_통합데이터"].notna().sum()
+                st.session_state["df_merged"]   = df_merged_new
+                st.session_state["ambiguous"]   = ambiguous_new
+                st.session_state["df_comments"] = df_comments
+
+                if ambiguous_new:
+                    st.warning(
+                        f"자동 연결 완료 — {matched}/{len(df_merged_new)}명 | "
+                        f"같은 이름이 **{len(ambiguous_new)}건** 있어요. 아래에서 직접 연결해 주세요! ↓"
+                    )
+                else:
+                    st.success(f"완료! {matched} / {len(df_merged_new)}명 면접 코멘트 연결됐어요.")
+
+            # ── 동명이인 수동 매칭 ───────────────────────────
+            if st.session_state.get("ambiguous"):
+                ambiguous_cases = st.session_state["ambiguous"]
+                st.divider()
+                st.subheader("같은 이름 직접 연결하기")
+                st.caption("같은 이름이 여러 명이에요! 각 면접 기록이 누구 건지 직접 골라주세요.")
+
+                from collections import defaultdict
+                groups: dict[str, list[dict]] = defaultdict(list)
+                for case in ambiguous_cases:
+                    groups[case["name"]].append(case)
+
+                for name, cases in groups.items():
+                    st.markdown(f"### 동명이인: **{name}** ({len(cases)}건)")
+                    candidates = cases[0]["candidates"]
+                    cand_options = ["— 매칭 안 함 —"] + [c["label"] for c in candidates]
+
+                    for case in cases:
+                        raw  = case.get("원본이름", name)
+                        dept = case.get("학과", "")
+                        sid  = case.get("학번", "")
+                        info_parts = [f"원본: **{raw}**"]
+                        if dept: info_parts.append(f"학과: {dept}")
+                        if sid:  info_parts.append(f"학번: {sid}")
+                        info_str = " / ".join(info_parts)
+
+                        preview = case["comment_text"][:150].replace("\n", " ")
+                        if len(case["comment_text"]) > 150:
+                            preview += "…"
+
+                        with st.container(border=True):
+                            st.markdown(info_str)
+                            if not sid:
+                                st.warning("학번 정보가 없어요 — 이름이나 코멘트 내용으로 구분해 주세요.")
+                            st.caption(preview)
+                            st.selectbox(
+                                "→ 누구의 면접 기록인가요?",
+                                options=cand_options,
+                                key=f"manual_{case['comment_idx']}",
+                            )
+
+                    chosen_labels = [
+                        st.session_state.get(f"manual_{c['comment_idx']}", "— 매칭 안 함 —")
+                        for c in cases
+                    ]
+                    non_skip = [l for l in chosen_labels if l != "— 매칭 안 함 —"]
+                    if len(non_skip) != len(set(non_skip)):
+                        st.warning("같은 사람한테 두 개 이상 연결됐어요! 확인해 주세요.")
+                    st.divider()
+
+                if st.button("수동 매칭 확정", type="primary", key="btn_manual_confirm"):
+                    all_chosen = [
+                        st.session_state.get(f"manual_{case['comment_idx']}", "— 매칭 안 함 —")
+                        for case in ambiguous_cases
+                    ]
+                    non_skip_all = [l for l in all_chosen if l != "— 매칭 안 함 —"]
+                    if len(non_skip_all) != len(set(non_skip_all)):
+                        st.error("같은 사람에게 면접 기록이 두 개 이상 연결됐어요! 수정 후 다시 확정해 주세요.")
+                    else:
+                        df_m = st.session_state["df_merged"].copy()
+                        for case in ambiguous_cases:
+                            chosen_label = st.session_state.get(
+                                f"manual_{case['comment_idx']}", "— 매칭 안 함 —"
+                            )
+                            if chosen_label == "— 매칭 안 함 —":
+                                continue
+                            chosen_idx = next(
+                                c["base_idx"]
+                                for c in case["candidates"]
+                                if c["label"] == chosen_label
+                            )
+                            df_m.at[chosen_idx, "면접_통합데이터"] = case["comment_text"]
+
+                        st.session_state["df_merged"]  = df_m
+                        st.session_state["ambiguous"]  = []
+                        matched_final = df_m["면접_통합데이터"].notna().sum()
+                        st.success(f"연결 완료! 최종 {matched_final}/{len(df_m)}명 연결됐어요.")
+                        st.rerun()
+
+            if "df_merged" in st.session_state:
+                st.dataframe(st.session_state["df_merged"], use_container_width=True)
 
                 st.divider()
 
-            if st.button("수동 매칭 확정", type="primary", key="btn_manual_confirm"):
-                # 중복 배정 최종 검사
-                all_chosen = [
-                    st.session_state.get(f"manual_{case['comment_idx']}", "— 매칭 안 함 —")
-                    for case in ambiguous_cases
-                ]
-                non_skip_all = [l for l in all_chosen if l != "— 매칭 안 함 —"]
-                if len(non_skip_all) != len(set(non_skip_all)):
-                    st.error("같은 사람에게 면접 기록이 두 개 이상 연결됐어요! 수정 후 다시 확정해 주세요.")
-                else:
-                    df_m = st.session_state["df_merged"].copy()
-                    for case in ambiguous_cases:
-                        chosen_label = st.session_state.get(
-                            f"manual_{case['comment_idx']}", "— 매칭 안 함 —"
-                        )
-                        if chosen_label == "— 매칭 안 함 —":
-                            continue
-                        chosen_idx = next(
-                            c["base_idx"]
-                            for c in case["candidates"]
-                            if c["label"] == chosen_label
-                        )
-                        df_m.at[chosen_idx, "면접_통합데이터"] = case["comment_text"]
+                # ── ③ AI 재분析 ─────────────────────────────
+                st.subheader("③ AI 재분析 (선택)")
+                st.caption("자소서 분析 결과와 면접 코멘트를 합쳐서 AI가 다시 성격을 판단해요.")
 
-                    st.session_state["df_merged"]  = df_m
-                    st.session_state["ambiguous"]  = []
-                    matched_final = df_m["면접_통합데이터"].notna().sum()
-                    st.success(f"연결 완료! 최종 {matched_final}/{len(df_m)}명 연결됐어요.")
-                    st.rerun()
+                df_merged = st.session_state["df_merged"]
+                has_comments = df_merged["면접_통합데이터"].notna().any()
+                if not has_comments:
+                    st.info("연결된 면접 코멘트가 없어서 재분析을 건너뛸게요.")
 
-        if "df_merged" in st.session_state:
-            df_merged = st.session_state["df_merged"]
-            st.dataframe(df_merged, use_container_width=True)
+                if st.button("AI 재분析하기!", type="primary", disabled=not has_comments, key="btn_reanalyze"):
+                    df_final = df_merged.copy()
+                    df_final["최종_성격_판정"] = df_final["성격 판정"]
+                    df_final["성격_키워드"]    = ""
+                    df_final["면접_평균점수"]  = ""
+                    df_final["최종_근거"]      = df_final["근거 요약"]
 
-            st.divider()
+                    targets  = df_final[df_final["면접_통합데이터"].notna()]
+                    progress = st.progress(0, text="재분析 중...")
 
-            # ── ④ 면접 코멘트 기반 최종 재분석 ─────────────
-            st.subheader("AI로 다시 분석하기 (선택)")
-            st.caption("자기소개서 분석 결과와 면접 코멘트를 합쳐서 AI가 다시 성격을 판단해요.")
+                    for _i, (idx, row) in enumerate(targets.iterrows()):
+                        raw_comment = str(row["면접_통합데이터"]).strip()
+                        try:
+                            result = reanalyze_final(
+                                이름=str(row["이름"]).strip(),
+                                성격_판정=str(row["성격 판정"]).strip(),
+                                근거=str(row["근거 요약"]).strip(),
+                                면접_통합데이터=raw_comment,
+                                model=selected_model,
+                            )
+                            lines = [l.strip() for l in result.splitlines() if l.strip()]
+                            df_final.at[idx, "최종_성격_판정"] = lines[0] if len(lines) > 0 else ""
+                            df_final.at[idx, "성격_키워드"]    = lines[1] if len(lines) > 1 else ""
+                            df_final.at[idx, "최종_근거"]      = lines[2] if len(lines) > 2 else (lines[1] if len(lines) > 1 else "")
+                        except Exception as e:
+                            df_final.at[idx, "최종_근거"] = f"오류: {e}"
 
-            has_comments = df_merged["면접_통합데이터"].notna().any()
-            if not has_comments:
-                st.info("연결된 면접 코멘트가 없어서 재분석을 건너뛸게요.")
+                        df_final.at[idx, "면접_평균점수"] = extract_interview_score(raw_comment)
+                        progress.progress((_i + 1) / len(targets), text=f"재분析 중... ({_i+1}/{len(targets)})")
 
-            if st.button(
-                "다시 분석하기!", type="primary",
-                disabled=not has_comments, key="btn_reanalyze"
-            ):
-                df_final = df_merged.copy()
-                df_final["최종_성격_판정"] = df_final["성격 판정"]
-                df_final["성격_키워드"]   = ""
-                df_final["면접_평균점수"] = ""
-                df_final["최종_근거"]     = df_final["근거 요약"]
+                    progress.empty()
 
-                targets  = df_final[df_final["면접_통합데이터"].notna()]
-                progress = st.progress(0, text="재분석 중...")
+                    df_for_stage3 = df_final.copy()
+                    df_for_stage3["성격 판정"]   = df_for_stage3["최종_성격_판정"]
+                    df_for_stage3["근거 요약"]   = df_for_stage3["최종_근거"]
+                    df_for_stage3["성격_키워드"] = df_for_stage3["성격_키워드"]
+                    st.session_state["df_personality"] = df_for_stage3.drop(
+                        columns=["최종_성격_판정", "최종_근거", "면접_통합데이터"], errors="ignore"
+                    )
+                    st.session_state["df_merged"] = df_final
+                    st.success("재분析 완료! STEP 3 자리배치에 자동으로 반영돼요.")
+                    st.dataframe(df_final, use_container_width=True)
 
-                for i, (idx, row) in enumerate(targets.iterrows()):
-                    raw_comment = str(row["면접_통합데이터"]).strip()
-                    try:
-                        result = reanalyze_final(
-                            이름=str(row["이름"]).strip(),
-                            성격_판정=str(row["성격 판정"]).strip(),
-                            근거=str(row["근거 요약"]).strip(),
-                            면접_통합데이터=raw_comment,
-                            model=selected_model,
-                        )
-                        lines = [l.strip() for l in result.splitlines() if l.strip()]
-                        df_final.at[idx, "최종_성격_판정"] = lines[0] if len(lines) > 0 else ""
-                        df_final.at[idx, "성격_키워드"]   = lines[1] if len(lines) > 1 else ""
-                        df_final.at[idx, "최종_근거"]     = lines[2] if len(lines) > 2 else (lines[1] if len(lines) > 1 else "")
-                    except Exception as e:
-                        df_final.at[idx, "최종_근거"] = f"오류: {e}"
-
-                    df_final.at[idx, "면접_평균점수"] = extract_interview_score(raw_comment)
-                    progress.progress((i + 1) / len(targets), text=f"재분석 중... ({i+1}/{len(targets)})")
-
-                progress.empty()
-
-                # 3단계가 참조하는 df_personality를 최종본으로 덮어쓴다
-                df_for_stage3 = df_final.copy()
-                df_for_stage3["성격 판정"] = df_for_stage3["최종_성격_판정"]
-                df_for_stage3["근거 요약"] = df_for_stage3["최종_근거"]
-                df_for_stage3["성격_키워드"] = df_for_stage3["성격_키워드"]
-                st.session_state["df_personality"] = df_for_stage3.drop(
-                    columns=["최종_성격_판정", "최종_근거", "면접_통합데이터"], errors="ignore"
+                st.divider()
+                excel_bytes = to_final_excel_bytes(st.session_state["df_merged"])
+                st.download_button(
+                    label="최종 분析 파일 엑셀 다운로드",
+                    data=excel_bytes,
+                    file_name="최종_분析_결과.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
-                st.session_state["df_merged"] = df_final
-                st.success("다시 분석 완료! 3단계 자리배치에 자동으로 반영돼요.")
-                st.dataframe(df_final, use_container_width=True)
 
-            st.divider()
-
-            # ── ⑤ 다운로드 ──────────────────────────────────
-            excel_bytes = to_final_excel_bytes(st.session_state["df_merged"])
-            st.download_button(
-                label="최종 분석 파일 엑셀 다운로드",
-                data=excel_bytes,
-                file_name="최종_분석_결과.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-    else:
-        st.info("면접 점수표 엑셀 파일을 올리면 내용이 여기에 나타나요.")
 
 # ── 3단계: 자리배치 ───────────────────────────────────────────
 with tab3:
@@ -1308,48 +1411,8 @@ with tab3:
 
     col_left, col_right = st.columns([1, 2])
 
-    # ── 설정 패널 ────────────────────────────────────────────
     with col_left:
         st.subheader("⚙️ 배치 설정")
-
-        uploaded_roster = st.file_uploader(
-            "참가자 명단 파일 (txt 또는 엑셀)",
-            type=["txt", "xlsx", "xls"],
-            key="seating_roster",
-            help="이름 목록이 들어있는 txt 파일이나 엑셀 파일을 올려주세요.",
-        )
-        if uploaded_roster is not None:
-            df_roster = parse_roster_file(uploaded_roster)
-            if df_roster is not None and not df_roster.empty:
-                st.success(f"참가자 {len(df_roster)}명 인식 완료!")
-                st.dataframe(df_roster, use_container_width=True)
-                st.session_state["df_roster"] = df_roster
-            else:
-                st.warning("명단을 인식하지 못했어요. 파일 형식을 확인해 주세요.")
-
-        st.divider()
-        st.subheader("⏰ 늦참자")
-        st.caption("나중에 온 사람 이름을 한 줄에 하나씩 적어주세요. 나머지 참가자와 골고루 섞어 배치돼요.")
-        late_input = st.text_area(
-            "늦참자 이름",
-            placeholder="홍길동\n김철수\n이영희",
-            key="late_arrivals_input",
-            label_visibility="collapsed",
-            height=90,
-        )
-
-        st.divider()
-        st.subheader("👑 임원진 / 기존 부원")
-        st.caption("자소서를 제출하지 않은 임원진·기존 부원 이름을 적어주세요. 모두 외향형으로 배치돼요.")
-        officer_input = st.text_area(
-            "임원진/기존부원 이름",
-            placeholder="회장 홍길동\n부회장 김철수\n이영희",
-            key="officer_input",
-            label_visibility="collapsed",
-            height=90,
-        )
-
-        st.divider()
 
         num_people = st.slider("테이블당 최대 인원수", min_value=2, max_value=8, value=4, step=1)
 
@@ -1370,24 +1433,31 @@ with tab3:
             index=0,
         )
 
-    # ── 결과 패널 ────────────────────────────────────────────
     with col_right:
         st.subheader("배치 결과")
 
         has_data = "df_personality" in st.session_state
         if not has_data:
-            st.info("먼저 1단계에서 자기소개서 분석을 완료해 주세요!")
+            st.info("먼저 STEP 2에서 자소서 성격 분析을 완료해 주세요!")
 
         if st.button("🪑 자리 배치하기!", type="primary", disabled=not has_data):
             df_src = st.session_state["df_personality"].copy()
 
-            # ── 늦참자: E/I 전체 비율 보고 교대 배정 ─────────────
+            # 취소자 한 번 더 필터 (혹시 분析 이후 추가된 경우)
+            _cancel_set3 = {
+                n.strip()
+                for n in st.session_state.get("cancellation_input", "").splitlines()
+                if n.strip()
+            }
+            if _cancel_set3:
+                _keep3 = ~df_src["이름"].astype(str).str.strip().isin(_cancel_set3)
+                df_src = df_src[_keep3].reset_index(drop=True)
+
             late_names = [
                 n.strip()
                 for n in st.session_state.get("late_arrivals_input", "").splitlines()
                 if n.strip()
             ]
-            # ── 임원진/기존부원: 전원 외향형 ──────────────────────
             officer_names = [
                 n.strip()
                 for n in st.session_state.get("officer_input", "").splitlines()
@@ -1396,7 +1466,6 @@ with tab3:
 
             extra_rows: list[dict] = []
 
-            # 임원진 먼저 추가 (외향형 고정)
             for name in officer_names:
                 extra_rows.append({
                     "이름":        name,
@@ -1408,7 +1477,6 @@ with tab3:
                     "임원":        True,
                 })
 
-            # 늦참자: 현재 E/I 비율 기준으로 교대 배정
             e_cnt = df_src["성격 판정"].str.contains("외향", na=False).sum() + len(officer_names)
             i_cnt = len(df_src) - (df_src["성격 판정"].str.contains("외향", na=False).sum())
             for name in late_names:
@@ -1428,9 +1496,7 @@ with tab3:
                 })
 
             if extra_rows:
-                df_src = pd.concat(
-                    [df_src, pd.DataFrame(extra_rows)], ignore_index=True
-                )
+                df_src = pd.concat([df_src, pd.DataFrame(extra_rows)], ignore_index=True)
 
             with st.spinner("자리 배치 중..."):
                 df_seated = assign_seats(
@@ -1439,7 +1505,7 @@ with tab3:
                 )
 
             st.session_state["df_seated"] = df_seated
-            total = len(df_seated)
+            total    = len(df_seated)
             n_tables = df_seated["테이블_번호"].max()
             late_cnt = int(df_seated["늦참자"].fillna(False).sum()) if "늦참자" in df_seated.columns else 0
             off_cnt  = int(df_seated["임원"].fillna(False).sum())   if "임원"   in df_seated.columns else 0
@@ -1451,7 +1517,6 @@ with tab3:
 
         if "df_seated" in st.session_state:
             df_seated = st.session_state["df_seated"]
-            num_tables = df_seated["테이블_번호"].max()
 
             # ── 테이블 카드 뷰 ────────────────────────────────
             st.divider()
@@ -1463,7 +1528,7 @@ with tab3:
             for row_start in range(0, len(table_nums), COLS_PER_ROW):
                 card_cols = st.columns(COLS_PER_ROW)
                 for col_i, t_num in enumerate(table_nums[row_start: row_start + COLS_PER_ROW]):
-                    grp = df_seated[df_seated["테이블_번호"] == t_num]
+                    grp   = df_seated[df_seated["테이블_번호"] == t_num]
                     e_cnt = (grp["EI"] == "E").sum()
                     i_cnt = (grp["EI"] == "I").sum()
                     with card_cols[col_i]:
@@ -1480,7 +1545,7 @@ with tab3:
                                 tooltip = ""
                             is_late    = bool(r.get("늦참자", False))
                             is_officer = bool(r.get("임원", False))
-                            late_badge = ' <span style="color:#e67e22;font-size:0.75em">⏰늦참</span>'   if is_late    else ""
+                            late_badge = ' <span style="color:#e67e22;font-size:0.75em">⏰늦참</span>' if is_late    else ""
                             off_badge  = ' <span style="color:#8e44ad;font-size:0.75em">👑임원</span>' if is_officer else ""
                             name_html = (
                                 f'<span title="{tooltip}" style="cursor:help;'
