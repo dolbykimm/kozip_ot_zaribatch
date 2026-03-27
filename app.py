@@ -1037,7 +1037,7 @@ with tab1:
         st.subheader("추가 인원 & 조정")
 
         st.markdown("**👑 임원진 / 기존 부원**")
-        st.caption("자소서를 제출하지 않은 임원진·기존 부원. 모두 외향형으로 처리돼요.")
+        st.caption("한 줄에 한 명씩 입력하세요. 이름만 쓰면 외향형, 이름 뒤에 내향/내향형을 붙이면 내향형으로 처리돼요.")
         st.text_area(
             "임원진/기존부원 이름",
             placeholder="회장 홍길동\n부회장 김철수\n이영희",
@@ -1096,7 +1096,7 @@ with tab1:
 
 # ── 2단계: 분석 ───────────────────────────────────────────────
 with tab2:
-    st.header("🔍 STEP 2 · 분析")
+    st.header("🔍 STEP 2 · 분석")
 
     if "df_resume_raw" not in st.session_state:
         st.warning("먼저 **STEP 1**에서 자소서 파일을 올려주세요!")
@@ -1147,35 +1147,48 @@ with tab2:
             label_visibility="collapsed",
         )
 
-        # ── 취소자 필터링 ────────────────────────────────────
+        # ── 참가자 명단 필터링 + 취소자 제외 ──────────────────
         df_resume_filtered = df_resume.copy()
-        if _cancel_set2 and confirmed_map.get("이름"):
+        if confirmed_map.get("이름"):
             _name_col = confirmed_map["이름"]
-            _keep = ~df_resume_filtered[_name_col].astype(str).str.strip().isin(_cancel_set2)
-            _removed = int((~_keep).sum())
-            df_resume_filtered = df_resume_filtered[_keep].reset_index(drop=True)
-            if _removed > 0:
-                st.info(f"취소자 {_removed}명이 제외됐어요. 분석 대상: **{len(df_resume_filtered)}명**")
+            # ① 참가자 명단이 있으면 명단에 있는 사람만 남김
+            _df_roster = st.session_state.get("df_roster")
+            if _df_roster is not None and not _df_roster.empty and "이름" in _df_roster.columns:
+                _roster_names = set(_df_roster["이름"].astype(str).str.strip())
+                _before = len(df_resume_filtered)
+                df_resume_filtered = df_resume_filtered[
+                    df_resume_filtered[_name_col].astype(str).str.strip().isin(_roster_names)
+                ].reset_index(drop=True)
+                _roster_filtered = _before - len(df_resume_filtered)
+                if _roster_filtered > 0:
+                    st.info(f"참가자 명단 기준으로 필터링: {_roster_filtered}명 제외, 대상 {len(df_resume_filtered)}명")
+            # ② 취소자 제외
+            if _cancel_set2:
+                _keep = ~df_resume_filtered[_name_col].astype(str).str.strip().isin(_cancel_set2)
+                _removed = int((~_keep).sum())
+                df_resume_filtered = df_resume_filtered[_keep].reset_index(drop=True)
+                if _removed > 0:
+                    st.info(f"취소자 {_removed}명이 제외됐어요. 분석 대상: **{len(df_resume_filtered)}명**")
 
-        # ── 분析 대상 명단 미리보기 ──────────────────────────
-        st.subheader("분析 대상 명단")
+        # ── 분석 대상 명단 미리보기 ──────────────────────────
+        st.subheader("분석 대상 명단")
         st.dataframe(df_resume_filtered, use_container_width=True)
 
         unresolved = [lbl for role, lbl in role_labels.items() if confirmed_map[role] is None]
 
         st.divider()
 
-        # ── ① 자소서 성격 분析 ──────────────────────────────
-        st.subheader("① 자소서 성격 분析")
+        # ── ① 자소서 성격 분석 ──────────────────────────────
+        st.subheader("① 자소서 성격 분석")
 
         if unresolved:
             st.warning(f"아직 연결 안 된 항목: **{', '.join(unresolved)}** — 위 드롭다운에서 골라주세요!")
         elif not essay_cols:
             st.warning("자기소개서 내용이 있는 칸을 하나 이상 골라야 해요!")
         else:
-            if st.button("자소서 성격 분析 시작", type="primary", key="btn_analyze"):
+            if st.button("자소서 성격 분석 시작", type="primary", key="btn_analyze"):
                 results = []
-                progress = st.progress(0, text="분析 중...")
+                progress = st.progress(0, text="분석 중...")
                 total = len(df_resume_filtered)
 
                 for _i, (_, row) in enumerate(df_resume_filtered.iterrows()):
@@ -1205,15 +1218,42 @@ with tab2:
                         "성격 판정": 판정,
                         "근거 요약": 근거,
                     })
-                    progress.progress((_i + 1) / total, text=f"분析 중... ({_i + 1}/{total})")
+                    progress.progress((_i + 1) / total, text=f"분석 중... ({_i + 1}/{total})")
 
                 progress.empty()
                 df_result = pd.DataFrame(results)
                 st.session_state["df_personality"] = df_result
-                st.success("분析 완료!")
+                st.success("분석 완료!")
 
             if "df_personality" in st.session_state:
-                st.dataframe(st.session_state["df_personality"], use_container_width=True)
+                _df_p = st.session_state["df_personality"]
+                st.dataframe(_df_p, use_container_width=True)
+
+                # ── 성격 판정 직접 수정 ──────────────────────
+                with st.expander("✏️ 성격 판정 직접 수정하기", expanded=False):
+                    st.caption("AI 판정이 틀렸다면 여기서 바꿔주세요. 이름 옆 근거 요약도 참고하세요.")
+                    _edited = False
+                    _df_edit = _df_p.copy()
+                    for _ei, _erow in _df_p.iterrows():
+                        _ecols = st.columns([2, 2, 3])
+                        _ecols[0].markdown(f"**{_erow['이름']}**")
+                        _cur = "외향형" if "외향" in str(_erow["성격 판정"]) else "내향형"
+                        _new_val = _ecols[1].radio(
+                            "판정",
+                            options=["외향형", "내향형"],
+                            index=0 if _cur == "외향형" else 1,
+                            horizontal=True,
+                            key=f"edit_ei_{_ei}",
+                            label_visibility="collapsed",
+                        )
+                        _ecols[2].caption(str(_erow.get("근거 요약", ""))[:60])
+                        if _new_val != _erow["성격 판정"]:
+                            _df_edit.at[_ei, "성격 판정"] = _new_val
+                            _edited = True
+                    if st.button("수정 적용", key="btn_apply_ei_edit"):
+                        st.session_state["df_personality"] = _df_edit
+                        st.success("성격 판정이 업데이트됐어요!")
+                        st.rerun()
 
         # ── ② 면접표 병합 ────────────────────────────────────
         if "interview_sheets" in st.session_state:
@@ -1225,8 +1265,8 @@ with tab2:
                 with st.expander(f"시트 미리보기: {sheet_name}  ({len(df_s)}행 × {len(df_s.columns)}열)"):
                     st.dataframe(df_s, use_container_width=True)
 
-            if st.button("AI로 시트 구조 분析", key="btn_infer"):
-                with st.spinner("LLM이 시트 구조를 분析 중..."):
+            if st.button("AI로 시트 구조 분석", key="btn_infer"):
+                with st.spinner("LLM이 시트 구조를 분석 중..."):
                     sheet_summary = build_sheets_summary(sheets)
                     inference     = infer_sheet_structure(sheet_summary, selected_model)
                 st.session_state["sheet_inference"] = inference
@@ -1236,7 +1276,7 @@ with tab2:
 
             _has_personality = "df_personality" in st.session_state
             if not _has_personality:
-                st.warning("먼저 위 ①에서 자소서 성격 분析을 완료해 주세요!")
+                st.warning("먼저 위 ①에서 자소서 성격 분석을 완료해 주세요!")
 
             if st.button("면접표 병합하기", type="primary", disabled=not _has_personality, key="btn_merge"):
                 with st.spinner("면접 코멘트 추출 중..."):
@@ -1342,16 +1382,16 @@ with tab2:
 
                 st.divider()
 
-                # ── ③ AI 재분析 ─────────────────────────────
-                st.subheader("③ AI 재분析 (선택)")
-                st.caption("자소서 분析 결과와 면접 코멘트를 합쳐서 AI가 다시 성격을 판단해요.")
+                # ── ③ AI 재분석 ─────────────────────────────
+                st.subheader("③ AI 재분석 (선택)")
+                st.caption("자소서 분석 결과와 면접 코멘트를 합쳐서 AI가 다시 성격을 판단해요.")
 
                 df_merged = st.session_state["df_merged"]
                 has_comments = df_merged["면접_통합데이터"].notna().any()
                 if not has_comments:
-                    st.info("연결된 면접 코멘트가 없어서 재분析을 건너뛸게요.")
+                    st.info("연결된 면접 코멘트가 없어서 재분석을 건너뛸게요.")
 
-                if st.button("AI 재분析하기!", type="primary", disabled=not has_comments, key="btn_reanalyze"):
+                if st.button("AI 재분석하기!", type="primary", disabled=not has_comments, key="btn_reanalyze"):
                     df_final = df_merged.copy()
                     df_final["최종_성격_판정"] = df_final["성격 판정"]
                     df_final["성격_키워드"]    = ""
@@ -1359,7 +1399,7 @@ with tab2:
                     df_final["최종_근거"]      = df_final["근거 요약"]
 
                     targets  = df_final[df_final["면접_통합데이터"].notna()]
-                    progress = st.progress(0, text="재분析 중...")
+                    progress = st.progress(0, text="재분석 중...")
 
                     for _i, (idx, row) in enumerate(targets.iterrows()):
                         raw_comment = str(row["면접_통합데이터"]).strip()
@@ -1379,7 +1419,7 @@ with tab2:
                             df_final.at[idx, "최종_근거"] = f"오류: {e}"
 
                         df_final.at[idx, "면접_평균점수"] = extract_interview_score(raw_comment)
-                        progress.progress((_i + 1) / len(targets), text=f"재분析 중... ({_i+1}/{len(targets)})")
+                        progress.progress((_i + 1) / len(targets), text=f"재분석 중... ({_i+1}/{len(targets)})")
 
                     progress.empty()
 
@@ -1391,15 +1431,15 @@ with tab2:
                         columns=["최종_성격_판정", "최종_근거", "면접_통합데이터"], errors="ignore"
                     )
                     st.session_state["df_merged"] = df_final
-                    st.success("재분析 완료! STEP 3 자리배치에 자동으로 반영돼요.")
+                    st.success("재분석 완료! STEP 3 자리배치에 자동으로 반영돼요.")
                     st.dataframe(df_final, use_container_width=True)
 
                 st.divider()
                 excel_bytes = to_final_excel_bytes(st.session_state["df_merged"])
                 st.download_button(
-                    label="최종 분析 파일 엑셀 다운로드",
+                    label="최종 분석 파일 엑셀 다운로드",
                     data=excel_bytes,
-                    file_name="최종_분析_결과.xlsx",
+                    file_name="최종_분석_결과.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
 
@@ -1438,12 +1478,12 @@ with tab3:
 
         has_data = "df_personality" in st.session_state
         if not has_data:
-            st.info("먼저 STEP 2에서 자소서 성격 분析을 완료해 주세요!")
+            st.info("먼저 STEP 2에서 자소서 성격 분석을 완료해 주세요!")
 
         if st.button("🪑 자리 배치하기!", type="primary", disabled=not has_data):
             df_src = st.session_state["df_personality"].copy()
 
-            # 취소자 한 번 더 필터 (혹시 분析 이후 추가된 경우)
+            # 취소자 한 번 더 필터 (혹시 분석 이후 추가된 경우)
             _cancel_set3 = {
                 n.strip()
                 for n in st.session_state.get("cancellation_input", "").splitlines()
@@ -1458,26 +1498,36 @@ with tab3:
                 for n in st.session_state.get("late_arrivals_input", "").splitlines()
                 if n.strip()
             ]
-            officer_names = [
-                n.strip()
-                for n in st.session_state.get("officer_input", "").splitlines()
-                if n.strip()
-            ]
+            # 임원진 파싱: "이름 외향/내향" 형식. 성격 미기재 시 외향형 기본값
+            officer_entries: list[tuple[str, str]] = []
+            for _line in st.session_state.get("officer_input", "").splitlines():
+                _line = _line.strip()
+                if not _line:
+                    continue
+                if "내향" in _line:
+                    _ei = "내향형"
+                else:
+                    _ei = "외향형"
+                # 이름: 성격 키워드(외향/내향/형) 제거 후 앞부분
+                _name = _line.replace("외향형", "").replace("내향형", "").replace("외향", "").replace("내향", "").strip()
+                if _name:
+                    officer_entries.append((_name, _ei))
 
             extra_rows: list[dict] = []
 
-            for name in officer_names:
+            for _oname, _oei in officer_entries:
                 extra_rows.append({
-                    "이름":        name,
+                    "이름":        _oname,
                     "학과":        "미상",
                     "학번":        "",
-                    "성격 판정":   "외향형",
+                    "성격 판정":   _oei,
                     "근거 요약":   "임원/기존부원",
                     "성격_키워드": "",
                     "임원":        True,
                 })
 
-            e_cnt = df_src["성격 판정"].str.contains("외향", na=False).sum() + len(officer_names)
+            _officer_e_cnt = sum(1 for _, _ei in officer_entries if _ei == "외향형")
+            e_cnt = df_src["성격 판정"].str.contains("외향", na=False).sum() + _officer_e_cnt
             i_cnt = len(df_src) - (df_src["성격 판정"].str.contains("외향", na=False).sum())
             for name in late_names:
                 ei_val = "외향형" if e_cnt <= i_cnt else "내향형"
