@@ -879,7 +879,8 @@ with st.sidebar:
     st.subheader("📋 진행 현황")
     step1_done = "df_resume_raw"  in st.session_state
     step2_done = "df_personality" in st.session_state
-    step3_done = "df_seated"      in st.session_state
+    step3_done = "df_ei_adjusted" in st.session_state
+    step4_done = "df_seated"      in st.session_state
     st.markdown(
         f"{'✅' if step1_done else '⬜'} STEP 1 · 파일 업로드\n\n"
         f"{'✅' if step2_done else '⬜'} STEP 2 · 분석 완료\n\n"
@@ -955,10 +956,11 @@ with st.expander("💡 시작하기 전에 읽어주세요!", expanded=False):
 - **Groq API 키는 왼쪽 사이드바** ⬅ 에서 확인하세요.
 """)
 
-tab1, tab2, tab3 = st.tabs([
+tab1, tab2, tab3, tab4 = st.tabs([
     "📁  STEP 1 · 준비",
     "🔍  STEP 2 · 분석",
-    "🪑  STEP 3 · 자리배치",
+    "✏️  STEP 3 · 성격 조정",
+    "🪑  STEP 4 · 자리배치",
 ])
 
 # ── 1단계: 파일 업로드 & 수동 입력 ───────────────────────────
@@ -1444,9 +1446,60 @@ with tab2:
                 )
 
 
-# ── 3단계: 자리배치 ───────────────────────────────────────────
+# ── 3단계: 성격 조정 ─────────────────────────────────────────
 with tab3:
-    st.header("🪑 STEP 3 · 자리배치")
+    st.header("✏️ STEP 3 · 성격 조정")
+    st.caption("분析 결과를 보고, AI 판단이 틀렸다면 여기서 직접 바꿔주세요. 수정 후 STEP 4로 이동하세요.")
+
+    if "df_personality" not in st.session_state:
+        st.warning("먼저 **STEP 2**에서 자소서 분析을 완료해 주세요!")
+    else:
+        _df_adj_src = st.session_state["df_personality"].copy()
+
+        st.info(f"총 **{len(_df_adj_src)}명** — 이름 옆 토글로 외향/내향을 바꾼 뒤 **확정** 버튼을 눌러주세요.")
+
+        # st.data_editor로 간편 수정
+        _display_cols = [c for c in ["이름", "학과", "학번", "성격 판정", "근거 요약", "성격_키워드", "면접_평균점수"]
+                         if c in _df_adj_src.columns]
+        _edited_df = st.data_editor(
+            _df_adj_src[_display_cols].copy(),
+            column_config={
+                "이름":       st.column_config.TextColumn("이름", disabled=True, width="small"),
+                "학과":       st.column_config.TextColumn("학과", disabled=True, width="small"),
+                "학번":       st.column_config.TextColumn("학번", disabled=True, width="small"),
+                "성격 판정":  st.column_config.SelectboxColumn(
+                    "성격 판정",
+                    options=["외향형", "내향형"],
+                    required=True,
+                    width="small",
+                ),
+                "근거 요약":       st.column_config.TextColumn("근거", disabled=True, width="medium"),
+                "성격_키워드":     st.column_config.TextColumn("키워드", disabled=True, width="medium"),
+                "면접_평균점수":   st.column_config.TextColumn("면접점수", disabled=True, width="small"),
+            },
+            use_container_width=True,
+            hide_index=True,
+            num_rows="fixed",
+            key="ei_editor",
+        )
+
+        st.divider()
+        _col_a, _col_b = st.columns([1, 3])
+        if _col_a.button("✅ 조정 확정 → STEP 4", type="primary", key="btn_confirm_adjust"):
+            # 수정된 성격 판정을 df_personality에 반영
+            _df_out = _df_adj_src.copy()
+            _df_out["성격 판정"] = _edited_df["성격 판정"].values
+            st.session_state["df_personality"] = _df_out
+            st.session_state["df_ei_adjusted"] = True
+            _e = (_df_out["성격 판정"] == "외향형").sum()
+            _i = (_df_out["성격 판정"] == "내향형").sum()
+            st.success(f"확정 완료! 외향형 {_e}명 / 내향형 {_i}명 → STEP 4 탭으로 이동하세요.")
+        _col_b.caption("수정 없이 그냥 넘어가도 괜찮아요. STEP 4에서 분析 결과 그대로 배치돼요.")
+
+
+# ── 4단계: 자리배치 ───────────────────────────────────────────
+with tab4:
+    st.header("🪑 STEP 4 · 자리배치")
     st.caption("설정을 맞추고 버튼을 누르면 자리가 자동으로 배치돼요!")
 
     col_left, col_right = st.columns([1, 2])
@@ -1547,7 +1600,14 @@ with tab3:
 
             if extra_rows:
                 df_src = pd.concat([df_src, pd.DataFrame(extra_rows)], ignore_index=True)
+            # NaN → False 로 채워야 bool 변환 시 오탐 없음
+            df_src["임원"]   = df_src.get("임원",   pd.Series(False, index=df_src.index)).fillna(False)
+            df_src["늦참자"] = df_src.get("늦참자", pd.Series(False, index=df_src.index)).fillna(False)
 
+            # 성격 판정 값 정규화 (LLM 출력이 "외향형입니다" 등일 수 있어서)
+            df_src["성격 판정"] = df_src["성격 판정"].apply(
+                lambda x: "외향형" if "외향" in str(x) else "내향형"
+            )
             with st.spinner("자리 배치 중..."):
                 df_seated = assign_seats(
                     df_src, num_people, personality, student_id_policy,
@@ -1593,8 +1653,8 @@ with tab3:
                             tooltip = str(r.get("성격_키워드", "")).strip()
                             if not tooltip or tooltip in ("nan", "None"):
                                 tooltip = ""
-                            is_late    = bool(r.get("늦참자", False))
-                            is_officer = bool(r.get("임원", False))
+                            is_late    = r.get("늦참자") is True
+                            is_officer = r.get("임원") is True
                             late_badge = ' <span style="color:#e67e22;font-size:0.75em">⏰늦참</span>' if is_late    else ""
                             off_badge  = ' <span style="color:#8e44ad;font-size:0.75em">👑임원</span>' if is_officer else ""
                             name_html = (
